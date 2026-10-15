@@ -1,0 +1,10 @@
+[repository]
+source = "../rf_factory/fixtures/tiny_repo"
+
+[pipeline]
+min_function_lines = 10
+max_candidates = 10
+test_dir = "tests"
+test_pattern = "test*.py"
+test_timeout = 30
+require_tests = true
