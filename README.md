@@ -1,5 +1,7 @@
 # RF Instance Factory
 
+MVP2 pilot: [multi-file API migration and precheck](docs/pilot.md).
+
 这是用于研究 **SWE-Bench ProMax Refactoring instance synthesis 的初始实验框架**，不是 SWE-Bench ProMax 官方实现，也不是论文方法的完整复现。
 
 从可信本地 Python 仓库发现重构候选、生成任务、执行基本验证并导出 JSON/JSONL。无运行时第三方依赖，无需模型或 Docker。实际参考分析见 [docs/reference-analysis.md](docs/reference-analysis.md)。

@@ -74,3 +74,73 @@ class Instance:
     def __post_init__(self):
         if not self.instance_id or not self.task.problem_statement.strip() or not self.task.requirements or not self.validation.passed:
             raise ValueError("Cannot package an incomplete or rejected task")
+
+
+@dataclass(frozen=True)
+class RefactoringPlan:
+    candidate: Candidate
+    refactoring_type: str
+    api_module: str
+    old_api: str
+    new_api: str
+    affected_files: tuple[str, ...]
+    call_counts: dict[str, int]
+    structural_requirements: tuple[str, ...]
+    behavioral_invariants: tuple[str, ...]
+    strategy: str = "python-api-migration-v1"
+
+    def __post_init__(self):
+        relative(self.api_module)
+        for path in self.affected_files:
+            relative(path)
+        if len(self.affected_files) < 3 or not self.old_api.isidentifier() or not self.new_api.isidentifier():
+            raise ValueError("API migration requires an API and at least two caller files")
+        if self.old_api == self.new_api or self.api_module not in self.affected_files:
+            raise ValueError("Invalid API transformation")
+        if set(self.call_counts) != set(self.affected_files) - {self.api_module} or not all(n > 0 for n in self.call_counts.values()):
+            raise ValueError("Each caller must contain a migration target")
+
+
+@dataclass(frozen=True)
+class FileChange:
+    path: str
+    before_sha256: str
+    after_sha256: str
+    before: str
+    after: str
+    added_lines: int
+    deleted_lines: int
+
+
+@dataclass(frozen=True)
+class GoldPatch:
+    changes: tuple[FileChange, ...]
+    patch_sha256: str
+    transformation: dict
+    artifact: str = "gold/gold.patch"
+
+
+@dataclass(frozen=True)
+class PrecheckResult:
+    oracle: dict
+    noop: dict
+    passed: bool
+
+
+@dataclass(frozen=True)
+class PilotInstance:
+    instance_id: str
+    repository: Repository
+    task: Task
+    plan: RefactoringPlan
+    gold_patch: dict
+    evaluator: dict
+    precheck: PrecheckResult
+    environment: dict
+    schema_version: str = "rf.instance.v2"
+    task_type: str = "multi_file_api_migration"
+    status: str = "precheck_passed"
+
+    def __post_init__(self):
+        if not self.precheck.passed or not self.precheck.oracle.get("passed") or self.precheck.noop.get("passed"):
+            raise ValueError("Pilot instance requires gold PASS and no-op FAIL")

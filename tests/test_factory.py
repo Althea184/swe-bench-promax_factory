@@ -1,6 +1,6 @@
 import json
 import shutil
-import tempfile
+import uuid
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -12,18 +12,28 @@ from rf_factory.pipeline import Pipeline
 from rf_factory.repository import RepositoryPreparer, manifest
 from rf_factory.synthesis import TemplateSynthesizer
 from rf_factory.validation import TaskValidator
+from rf_factory.migration import ApiMigrationDiscovery, ApiMigrationPlanner, ApiMigrationGoldGenerator, PatchApplier, render_patch
+from rf_factory.evaluator_runner import evaluate
+from rf_factory.pilot import PilotPipeline
+from rf_factory.models import PrecheckResult
 
 FIXTURE = Path(__file__).resolve().parents[1] / "rf_factory/fixtures/tiny_repo"
+PILOT_FIXTURE = FIXTURE.parent / "api_migration_repo"
 
 
 class FactoryTests(unittest.TestCase):
     def setUp(self):
         scratch = FIXTURE.parents[2] / "runs" / "test-tmp"
         scratch.mkdir(parents=True, exist_ok=True)
-        self.tmp = tempfile.TemporaryDirectory(dir=scratch)
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = scratch / ("case-" + uuid.uuid4().hex)
+        self.root.mkdir()
+        self.addCleanup(self.cleanup_root)
         self.config = Config(FIXTURE)
+
+    def cleanup_root(self):
+        if not self.root.resolve().is_relative_to((FIXTURE.parents[2] / "runs" / "test-tmp").resolve()):
+            raise RuntimeError("Unsafe test cleanup path")
+        shutil.rmtree(self.root)
 
     def prepare(self):
         repo = RepositoryPreparer().prepare(FIXTURE, self.root / "source")
@@ -130,3 +140,89 @@ class FactoryTests(unittest.TestCase):
         for changes in ({"max_candidates": 0}, {"test_timeout": float("nan")}, {"require_tests": "yes"}):
             with self.assertRaises(ValueError):
                 replace(self.config, **changes)
+
+
+class PilotTests(unittest.TestCase):
+    def setUp(self):
+        scratch = FIXTURE.parents[2] / "runs" / "test-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        self.root = scratch / ("case-" + uuid.uuid4().hex)
+        self.root.mkdir()
+        self.addCleanup(self.cleanup_root)
+        self.config = Config(PILOT_FIXTURE)
+
+    def cleanup_root(self):
+        if not self.root.resolve().is_relative_to((FIXTURE.parents[2] / "runs" / "test-tmp").resolve()):
+            raise RuntimeError("Unsafe test cleanup path")
+        shutil.rmtree(self.root)
+
+    def prepare(self):
+        repo = RepositoryPreparer().prepare(PILOT_FIXTURE, self.root / "source")
+        candidates, _ = ApiMigrationDiscovery().discover(repo, self.config)
+        self.assertEqual(len(candidates), 1)
+        plan = ApiMigrationPlanner().plan(repo, candidates[0], self.config)
+        return repo, plan
+
+    def test_plan_gold_patch_and_application(self):
+        repo, plan = self.prepare()
+        self.assertEqual(plan.refactoring_type, "multi_file_api_migration")
+        self.assertEqual(plan.call_counts, {"invoice.py": 2, "quote.py": 1})
+        patch = ApiMigrationGoldGenerator().generate(repo, plan)
+        self.assertEqual({c.path for c in patch.changes}, {"money.py", "invoice.py", "quote.py"})
+        self.assertIn("+def format_amount(amount, *, currency):", render_patch(patch.changes))
+        before = manifest(repo.snapshot)
+        workspace = PatchApplier().apply(repo, patch, self.root / "gold")
+        self.assertEqual(manifest(repo.snapshot), before)
+        self.assertNotEqual(manifest(workspace), before)
+        self.assertIn("currency='USD'", (workspace / "invoice.py").read_text(encoding="utf-8"))
+
+    def test_invalid_patch_rejected_without_workspace(self):
+        repo, plan = self.prepare()
+        patch = ApiMigrationGoldGenerator().generate(repo, plan)
+        bad = replace(patch, changes=(replace(patch.changes[0], before_sha256="0" * 64), *patch.changes[1:]))
+        with self.assertRaises(FactoryError):
+            PatchApplier().apply(repo, bad, self.root / "bad")
+        self.assertFalse((self.root / "bad").exists())
+
+    def test_pipeline_rejects_invalid_gold(self):
+        class BrokenGenerator:
+            def generate(self, repo, plan):
+                patch = ApiMigrationGoldGenerator().generate(repo, plan)
+                return replace(patch, changes=(replace(patch.changes[0], before_sha256="0" * 64), *patch.changes[1:]))
+
+        output = self.root / "broken-run"
+        summary = PilotPipeline(generator=BrokenGenerator()).run(self.config, output)
+        self.assertEqual(summary["exported"], 0)
+        self.assertEqual(json.loads((output / "rejections.json").read_text(encoding="utf-8"))[0]["stage"], "gold_application")
+        self.assertFalse(json.loads(next((output / "gold").glob("*/application.json")).read_text(encoding="utf-8"))["passed"])
+
+    def test_evaluator_gold_and_noop(self):
+        repo, plan = self.prepare()
+        patch = ApiMigrationGoldGenerator().generate(repo, plan)
+        gold = PatchApplier().apply(repo, patch, self.root / "gold")
+        spec = {"api_module": plan.api_module, "old_api": plan.old_api, "new_api": plan.new_api,
+                "call_counts": plan.call_counts, "base_hashes": {p: repo.files[p] for p in plan.affected_files},
+                "test_dir": "tests", "test_pattern": "test*.py", "timeout": 20,
+                "functional_inputs": [[12.5, "USD"], [0, "EUR"]], "functional_expected": ["$12.50", "€0.00"]}
+        oracle = evaluate(gold, spec)
+        noop = evaluate(repo.snapshot, spec)
+        self.assertEqual(oracle["score"], 1.0)
+        self.assertEqual(noop["score"], 0.0)
+        self.assertTrue(noop["checks"]["regression_tests"])
+        self.assertTrue(PrecheckResult(oracle, noop, True).passed)
+        self.assertTrue(json.loads(dumps(PrecheckResult(oracle, noop, True)))["passed"])
+
+    def test_end_to_end_pilot(self):
+        before = manifest(PILOT_FIXTURE)
+        output = self.root / "pilot"
+        summary = PilotPipeline().run(self.config, output)
+        self.assertEqual((summary["candidates"], summary["gold_patch_success"], summary["oracle_pass"],
+                          summary["noop_fail"], summary["exported"]), (1, 1, 1, 1, 1))
+        row = json.loads((output / "instances.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(row["schema_version"], "rf.instance.v2")
+        self.assertEqual(row["precheck"]["oracle"]["score"], 1.0)
+        self.assertEqual(row["precheck"]["noop"]["score"], 0.0)
+        self.assertEqual(len(row["gold_patch"]["modified_files"]), 3)
+        self.assertTrue((output / row["gold_patch"]["artifact"]).is_file())
+        self.assertTrue((output / "Dockerfile").is_file())
+        self.assertEqual(manifest(PILOT_FIXTURE), before)

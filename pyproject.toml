@@ -16,4 +16,4 @@ rf-factory = "rf_factory.cli:main"
 include = ["rf_factory*"]
 
 [tool.setuptools.package-data]
-rf_factory = ["prompts/*.md", "fixtures/tiny_repo/*.py", "fixtures/tiny_repo/tests/*.py"]
+rf_factory = ["prompts/*.md", "fixtures/tiny_repo/*.py", "fixtures/tiny_repo/tests/*.py", "fixtures/api_migration_repo/*.py", "fixtures/api_migration_repo/tests/*.py"]
