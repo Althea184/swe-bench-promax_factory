@@ -5,17 +5,25 @@ import subprocess
 import sys
 import json
 from pathlib import Path
-from .models import OraclePlan
+from dataclasses import dataclass
+from .models import Oracle
 from .common import write_json
 from .repository import IGNORED
 
 
+@dataclass(frozen=True)
+class BaselinePlan:
+    test_dir: str
+    pattern: str
+    timeout: float
+
+
 class BaselineOracle:
     def prepare(self, repo, config):
-        return OraclePlan(config.test_dir, config.test_pattern, config.test_timeout)
+        return BaselinePlan(config.test_dir, config.test_pattern, config.test_timeout)
 
     def run(self, repo, plan, output: Path) -> dict:
-        output.mkdir(parents=True)
+        output.mkdir(parents=True, exist_ok=True)
         if not (repo.snapshot / plan.test_dir).is_dir():
             result = {"status": "not_available", "passed": False}
             write_json(output / "result.json", result)
@@ -43,3 +51,23 @@ class BaselineOracle:
             result.update(status="execution_error", error=str(exc))
         write_json(output / "result.json", result)
         return result
+
+
+class OracleBuilder:
+    """Build acceptance conditions from the task spec and base snapshot."""
+    def build(self, repo, spec, config):
+        if spec.refactoring_type != "api_migration":
+            raise ValueError(f"Unsupported oracle strategy: {spec.refactoring_type}")
+        checks = {"api_module": spec.entities["api_module"],
+                  "old_api": spec.entities["current_api"],
+                  "new_api": spec.entities["target_api"],
+                  "call_counts": spec.metadata["call_counts"],
+                  "base_hashes": {path: repo.files[path] for path in spec.scope},
+                  "functional_inputs": [[12.5, "USD"], [0, "EUR"]],
+                  "functional_expected": ["$12.50", "€0.00"]}
+        return Oracle("python-api-migration-v1", checks, config.test_dir, config.test_pattern, config.test_timeout)
+
+    @staticmethod
+    def verifier_spec(oracle):
+        return {**oracle.checks, "test_dir": oracle.test_dir,
+                "test_pattern": oracle.test_pattern, "timeout": oracle.timeout}

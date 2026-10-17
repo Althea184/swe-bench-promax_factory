@@ -1,4 +1,4 @@
-"""Portable, standard-library evaluator copied into each pilot artifact."""
+"""Portable checks; evaluator.py makes the acceptance decision."""
 import ast
 import importlib
 import json
@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 
-def evaluate(root: Path, spec: dict):
+def verify(root: Path, spec: dict):
     checks = {}
     details = {}
     api_path = root / spec["api_module"]
@@ -63,8 +63,7 @@ def evaluate(root: Path, spec: dict):
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         checks["functional_api"] = False
         details["functional_error"] = str(exc)
-    passed = bool(checks) and all(checks.values())
-    return {"passed": passed, "score": 1.0 if passed else 0.0, "checks": checks, "details": details}
+    return {"checks": checks, "details": details}
 
 
 def sha(path):
@@ -73,6 +72,6 @@ def sha(path):
 
 
 if __name__ == "__main__":
-    result = evaluate(Path(sys.argv[1]).resolve(), json.loads(Path(sys.argv[2]).read_text(encoding="utf-8")))
+    result = verify(Path(sys.argv[1]).resolve(), json.loads(Path(sys.argv[2]).read_text(encoding="utf-8")))
     print(json.dumps(result, ensure_ascii=False))
-    raise SystemExit(0 if result["passed"] else 1)
+    raise SystemExit(0 if result["checks"] and all(result["checks"].values()) else 1)

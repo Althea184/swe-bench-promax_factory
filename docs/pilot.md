@@ -1,27 +1,17 @@
-# Multi-file API migration pilot (MVP2)
+# API migration fixture walkthrough
 
-Run from the project root with Python 3.11+:
+Run `python -m rf_factory demo --output runs/<new-name>` from the project root. This is the one current pipeline, exercised with a small deterministic case.
 
-```powershell
-python -m rf_factory pilot --output runs/pilot-001
-python -m unittest discover -s tests -v
-```
+The original repository has `money.py` defining `render_amount(amount, currency)`. `invoice.py` and `quote.py` directly import and call it; `tests/test_money.py` covers USD, EUR, and a negative amount. Discovery identifies the definition with two caller modules as an opportunity, then filtering selects it.
 
-Use a new output directory for every run. `pilot --config examples/local.toml --output runs/my-pilot` accepts a trusted local Python repository. The deterministic strategy currently recognizes a module-level `render_amount(amount, currency)` and two or more modules that directly import and call it with two positional arguments. It changes the API to `format_amount(amount, *, currency)` and migrates each planned call. This deliberately narrow strategy avoids external LLM calls and historical commits. The existing `demo` and `run` commands retain their original MVP behavior.
+The structured `TaskSpec` records type `api_migration`, goal, the three-file scope, current/target APIs, required keyword-only currency, caller counts, behavioral invariants, and compatibility. It is internal evidence. Gold generation independently changes the definition to `format_amount(amount, *, currency)` and migrates the three direct calls. The patch is checked against source hashes before application.
 
-The pilot pipeline is `Repository -> Candidate -> RefactoringPlan -> GoldPatch -> copied gold workspace -> Evaluator -> gold/no-op precheck -> Task -> v2 Instance -> JSONL`. The `BaselineOracle` remains the original repository regression check. It is separate from the gold solution precheck.
+The solver-facing statement is:
 
-The evaluator checks the new keyword-only API, removal of the old definition, direct-import and call migration in every planned file, changes relative to the base hashes, original regression tests, and functional calls to the new API. A full score requires every check to pass. Gold must score 1.0 and the unchanged base must score 0.0; otherwise the candidate is rejected. This is a pilot acceptance gate, not a proof of semantic equivalence.
+> Use clearer naming for the public amount-formatting API and migrate dependent callers. Preserve formatted output and validation errors. Keep existing regression tests passing. Dependent callers must use the replacement API and supply currency explicitly by name.
 
-Each run keeps `source/`, `candidates.json`, `plans.json`, `gold/<candidate-id>/gold.patch`, `gold/<candidate-id>/patch.json`, `gold/<candidate-id>/workspace/`, `evaluator/<candidate-id>/runner.py`, `evaluator/<candidate-id>/spec.json`, `precheck/<candidate-id>/oracle.json`, `precheck/<candidate-id>/noop.json`, `instances.json`, `instances.jsonl`, `Dockerfile`, `docker.json`, and `summary.json`. The patch is a standard unified diff and its preimage/postimage hashes are checked before application. The copied gold workspace never replaces `source/`.
+It names the functionality, migration goal, behavior, and required call semantics. It does not reveal the new symbol, files, call-site inventory, line numbers, or edit sequence. Thus it is specific enough for the oracle's public contract without providing the gold transformation.
 
-The v2 JSONL row contains `repository` (run-relative base snapshot), `task` (solver-facing statement), `plan`, `gold_patch` (artifact path, files, line counts and transformation metadata), `evaluator` (run-relative runner/spec and command), `precheck` (gold/no-op results), and `environment` (Dockerfile path and runtime requirements). Keep the whole run directory when handing an instance to a coding-agent rollout. The rollout should receive `source/`, `task`, `evaluator/`, and `Dockerfile`; hold `gold/` and `precheck/` back from the solver.
+The oracle captures structural conditions for the migrated API and callers, source hashes to reject no-op, the regression suite, and USD/EUR functional examples. The portable verifier runs those checks; the evaluator aggregates them. In the clean local run, gold passed every check and unchanged source failed the migration checks while still passing regression tests. Different source bytes can pass; this oracle does not compare a solver patch to gold.
 
-The generated Dockerfile uses `python:3.11-slim`, copies the base repository and the self-contained evaluator, and runs the evaluator on the unchanged base. Build and run from the run directory:
-
-```powershell
-docker build -t rf-pilot -f Dockerfile .
-docker run --rm rf-pilot
-```
-
-The base container is expected to exit with status 1 because no-op must fail. If Docker or its daemon is unavailable, the run records `not_available` with the reason in `docker.json`; host prechecks and export still run. The pilot assumes trusted Python source and standard-library tests, a simple two-argument function, direct imports, and fixed functional examples for USD/EUR. Broader API shapes, dependency installation, stronger behavior checks, and more migration families are future work.
+The final `rf.instance.v3` row includes the base repository, TaskSpec, solver-facing statement, oracle, gold patch manifest, verifier command, gold/no-op precheck, and environment. `instances.jsonl` is a controller-side dataset export. Give a solver only the base repository and `problem_statement.text`; withhold the internal spec, oracle, gold, and precheck. This fixture does not establish that arbitrary real repository API migrations can be synthesized or verified.

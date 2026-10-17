@@ -1,10 +1,12 @@
 [repository]
-source = "../rf_factory/fixtures/tiny_repo"
+source = "../rf_factory/fixtures/api_migration_repo"
 
 [pipeline]
-min_function_lines = 10
+refactoring_type = "api_migration"
+discovery_strategy = "direct_import_api_migration"
+ranking_policy = "stable_path"
 max_candidates = 10
+abstraction_level = "medium"
 test_dir = "tests"
 test_pattern = "test*.py"
 test_timeout = 30
-require_tests = true

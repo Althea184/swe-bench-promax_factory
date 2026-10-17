@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rf-factory"
-version = "0.1.0"
+version = "0.3.0"
 description = "Experimental Refactoring instance synthesis framework"
 requires-python = ">=3.11"
 dependencies = []
@@ -16,4 +16,7 @@ rf-factory = "rf_factory.cli:main"
 include = ["rf_factory*"]
 
 [tool.setuptools.package-data]
-rf_factory = ["prompts/*.md", "fixtures/tiny_repo/*.py", "fixtures/tiny_repo/tests/*.py", "fixtures/api_migration_repo/*.py", "fixtures/api_migration_repo/tests/*.py"]
+rf_factory = ["prompts/*.md", "fixtures/api_migration_repo/*.py", "fixtures/api_migration_repo/tests/*.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
