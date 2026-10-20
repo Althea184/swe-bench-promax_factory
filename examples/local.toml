@@ -3,7 +3,7 @@ source = "../rf_factory/fixtures/api_migration_repo"
 
 [pipeline]
 refactoring_type = "api_migration"
-discovery_strategy = "direct_import_api_migration"
+discovery_strategy = "api_migration"
 ranking_policy = "stable_path"
 max_candidates = 10
 abstraction_level = "medium"

@@ -1,6 +1,6 @@
 # API migration fixture walkthrough
 
-Run `python -m rf_factory demo --output runs/<new-name>` from the project root. This is the one current pipeline, exercised with a small deterministic case.
+Run `python -m rf_factory demo --output runs` from the project root. The resulting directory is `runs/<instance-id>/`. This is the one current pipeline, exercised with a small deterministic case.
 
 The original repository has `money.py` defining `render_amount(amount, currency)`. `invoice.py` and `quote.py` directly import and call it; `tests/test_money.py` covers USD, EUR, and a negative amount. Discovery identifies the definition with two caller modules as an opportunity, then filtering selects it.
 

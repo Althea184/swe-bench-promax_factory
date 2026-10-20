@@ -14,6 +14,7 @@ from .problem_generation import ProblemGenerator
 from .verifier import verify
 from .evaluator import Evaluator
 from .instance_builder import InstanceBuilder
+from .difficulty import measure
 
 
 class Pipeline:
@@ -36,7 +37,7 @@ class Pipeline:
         stage = "repository"
         try:
             write_json(output / "config.json", config)
-            write_json(output / "runtime.json", {"python": platform.python_version(), "factory": "0.3.0"})
+            write_json(output / "runtime.json", {"python": platform.python_version(), "factory": "0.4.0"})
             repo = RepositoryPreparer().prepare(config.source, output / "source")
             write_json(output / "repository.json", repo)
             stage = "discovery"
@@ -44,8 +45,9 @@ class Pipeline:
             write_json(output / "candidates.json", candidates)
             write_json(output / "discovery_diagnostics.json", diagnostics)
             stage = "candidate_filtering"
-            candidates = filter_and_rank(candidates, config)
+            candidates, filtered = filter_and_rank(candidates, config)
             write_json(output / "selected_candidates.json", candidates)
+            write_json(output / "candidate_rejections.json", filtered)
             stage = "baseline"
             baseline_oracle = BaselineOracle()
             baseline_plan = baseline_oracle.prepare(repo, config)
@@ -63,6 +65,8 @@ class Pipeline:
                     write_json(task_dir / "spec.json", spec)
                     stage = "gold_generation"
                     patch = self.generator.generate(repo, spec)
+                    if len(patch.changes) < config.min_changed_files:
+                        raise FactoryError("Gold patch changes too few files")
                     gold_dir = output / "gold" / candidate.candidate_id
                     gold_dir.mkdir(parents=True)
                     (gold_dir / "gold.patch").write_text(render_patch(patch.changes), encoding="utf-8", newline="\n")
@@ -86,6 +90,7 @@ class Pipeline:
                     verifier_dir.mkdir(parents=True)
                     shutil.copy2(Path(__file__).with_name("verifier.py"), verifier_dir / "runner.py")
                     shutil.copy2(Path(__file__).with_name("test_runner.py"), verifier_dir / "test_runner.py")
+                    shutil.copy2(Path(__file__).with_name("usage_analysis.py"), verifier_dir / "usage_analysis.py")
                     write_json(verifier_dir / "spec.json", self.oracle_builder.verifier_spec(oracle))
                     stage = "verification"
                     noop_workspace = output / "precheck" / candidate.candidate_id / "noop_workspace"
@@ -104,12 +109,15 @@ class Pipeline:
                     prechecks.append({"candidate_id": candidate.candidate_id, "passed": precheck.passed,
                                       "gold_passed": gold_result.passed, "noop_failed": not noop_result.passed})
                     if not precheck.passed:
-                        raise FactoryError("Gold PASS / no-op FAIL precheck did not hold")
+                        raise FactoryError("; ".join(precheck.reasons))
                     stage = "instance_building"
                     verifier_record = {"runner": f"verifier/{candidate.candidate_id}/runner.py",
                                        "spec": f"verifier/{candidate.candidate_id}/spec.json",
                                        "command": f"python verifier/{candidate.candidate_id}/runner.py <workspace> verifier/{candidate.candidate_id}/spec.json"}
-                    instances.append(self.instance_builder.build(repo, spec, problem, oracle, patch_record, verifier_record, precheck))
+                    difficulty = measure(spec, patch)
+                    write_json(task_dir / "difficulty_metadata.json", difficulty)
+                    instances.append(self.instance_builder.build(repo, spec, problem, oracle, patch_record,
+                                                                 verifier_record, precheck, difficulty))
                 except (FactoryError, OSError, ValueError, SyntaxError) as exc:
                     rejections.append({"candidate_id": candidate.candidate_id, "stage": stage, "error": str(exc)})
                     if stage == "gold_application":
@@ -138,31 +146,40 @@ class Pipeline:
     @staticmethod
     def _docker(output, instances):
         dockerfile = output / "Dockerfile"
-        (output / ".dockerignore").write_text("*\n!Dockerfile\n!source/\n!source/**\n!verifier/\n!verifier/**\n", encoding="utf-8")
+        (output / ".dockerignore").write_text("*\n!Dockerfile\n!docker/\n!docker/**\n!source/\n!source/**\n!verifier/\n!verifier/**\n", encoding="utf-8")
         if not instances:
             dockerfile.write_text("FROM python:3.11-slim\nWORKDIR /work\nCOPY source/ /work/\n", encoding="utf-8")
             return {"status": "not_run", "reason": "no valid instance"}
-        cid = instances[0].task_spec.candidate.candidate_id
-        dockerfile.write_text("FROM python:3.11-slim\nWORKDIR /work\nCOPY source/ /work/\n"
-                              f"COPY verifier/{cid}/ /verifier/\n"
-                              'CMD ["python", "/verifier/runner.py", "/work", "/verifier/spec.json"]\n', encoding="utf-8")
-        image = "rf-factory:" + instances[0].instance_id
-        commands = {"build": f"docker build -t {image} -f Dockerfile .", "run_base_expected_fail": f"docker run --rm {image}"}
+        entries = []
+        for instance in instances:
+            cid = instance.task_spec.candidate.candidate_id
+            path = output / instance.environment["dockerfile"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("FROM python:3.11-slim\nWORKDIR /work\nCOPY source/ /work/\n"
+                            f"COPY verifier/{cid}/ /verifier/\n"
+                            'CMD ["python", "/verifier/runner.py", "/work", "/verifier/spec.json"]\n', encoding="utf-8")
+            entries.append({"instance_id": instance.instance_id, "dockerfile": instance.environment["dockerfile"],
+                            "image": "rf-factory:" + instance.instance_id})
+        shutil.copy2(output / entries[0]["dockerfile"], dockerfile)
         try:
             version = subprocess.run(["docker", "version", "--format", "{{.Server.Version}}"], capture_output=True, text=True, timeout=15)
             if version.returncode:
-                return {"status": "not_available", "reason": version.stderr.strip() or version.stdout.strip(), "commands": commands}
-            build = subprocess.run(["docker", "build", "-t", image, "-f", str(dockerfile), str(output)], capture_output=True, text=True, timeout=180)
-            (output / "docker-build.stdout.txt").write_text(build.stdout, encoding="utf-8")
-            (output / "docker-build.stderr.txt").write_text(build.stderr, encoding="utf-8")
-            if build.returncode:
-                return {"status": "build_failed", "returncode": build.returncode, "commands": commands}
-            run = subprocess.run(["docker", "run", "--rm", image], capture_output=True, text=True, timeout=60)
-            (output / "docker-run.stdout.txt").write_text(run.stdout, encoding="utf-8")
-            (output / "docker-run.stderr.txt").write_text(run.stderr, encoding="utf-8")
-            result = json.loads(run.stdout) if run.stdout.strip() else {}
-            passed = run.returncode == 1 and result.get("checks") and not all(result["checks"].values())
-            return {"status": "built_and_ran" if passed else "run_failed", "base_verifier_expected_fail": bool(passed),
-                    "image": image, "commands": commands}
+                return {"status": "not_available", "reason": version.stderr.strip() or version.stdout.strip(), "instances": entries}
+            for entry in entries:
+                build = subprocess.run(["docker", "build", "-t", entry["image"], "-f", str(output / entry["dockerfile"]), str(output)],
+                                       capture_output=True, text=True, timeout=180)
+                slot = output / Path(entry["dockerfile"]).parent
+                (slot / "build.stdout.txt").write_text(build.stdout, encoding="utf-8")
+                (slot / "build.stderr.txt").write_text(build.stderr, encoding="utf-8")
+                if build.returncode:
+                    entry.update(status="build_failed", returncode=build.returncode)
+                    continue
+                run = subprocess.run(["docker", "run", "--rm", entry["image"]], capture_output=True, text=True, timeout=60)
+                (slot / "run.stdout.txt").write_text(run.stdout, encoding="utf-8")
+                (slot / "run.stderr.txt").write_text(run.stderr, encoding="utf-8")
+                result = json.loads(run.stdout) if run.stdout.strip() else {}
+                entry["status"] = "built_and_ran" if run.returncode == 1 and result.get("checks") and not all(result["checks"].values()) else "run_failed"
+            return {"status": "built_and_ran" if all(item["status"] == "built_and_ran" for item in entries) else "partial_failure",
+                    "instances": entries}
         except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
-            return {"status": "not_available", "reason": str(exc), "commands": commands}
+            return {"status": "not_available", "reason": str(exc), "instances": entries}

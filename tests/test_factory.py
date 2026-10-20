@@ -16,10 +16,15 @@ from rf_factory.pipeline import Pipeline
 from rf_factory.problem_generation import ProblemGenerator
 from rf_factory.repository import RepositoryPreparer, manifest
 from rf_factory.verifier import verify
+from rf_factory.rollout import prepare_rollout
+from rf_factory.publish import publish_run
+from rf_factory.candidates import filter_and_rank
+from rf_factory.models import Candidate
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "rf_factory/fixtures/api_migration_repo"
-SCRATCH = Path(__file__).resolve().parents[1] / "runs/test-tmp"
+HARD_CONFIG = Path(__file__).resolve().parents[1] / "examples/harder-api-migration.toml"
+SCRATCH = Path(__file__).resolve().parents[1] / ".rf-factory-work/test-tmp"
 SCRATCH.mkdir(parents=True, exist_ok=True)
 
 
@@ -141,3 +146,51 @@ def test_output_inside_source_rejected():
         with pytest.raises(FactoryError):
             Pipeline().run(Config(source), source / "run")
         assert not (source / "run").exists()
+
+
+def test_candidate_filter_records_trivial_reasons():
+    candidate = Candidate("one", "sample.py", "sample", 1, 2, "hash", "one use", "api-migration-v2",
+                          {"caller_modules": 1, "potential_files": 2, "behavioral_invariants": 0,
+                           "changes_calling_convention": False})
+    selected, rejected = filter_and_rank([candidate], Config(FIXTURE))
+    assert selected == []
+    assert set(rejected[0]["reasons"]) == {"too few caller modules", "too few changed files",
+                                          "no behavioral constraints", "mechanical rename only"}
+
+
+def test_harder_batch_and_solver_export():
+    with workspace_context() as root:
+        config = Config.load(HARD_CONFIG)
+        summary = Pipeline().run(config, root / "batch")
+        assert (summary["candidates"], summary["gold_pass"], summary["noop_fail"], summary["exported"]) == (5, 5, 5, 5)
+        rows = [json.loads(line) for line in (root / "batch/instances.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert len({row["instance_id"] for row in rows}) == 5
+        assert all(row["difficulty_metadata"]["affected_file_count"] >= 5 for row in rows)
+        assert all(row["difficulty_metadata"]["dependency_depth"] >= 3 for row in rows)
+        assert all(row["precheck"]["gold"]["passed"] and not row["precheck"]["noop"]["passed"] for row in rows)
+        assert all(row["problem_statement"]["quality"]["passed"] for row in rows)
+        chosen = rows[0]
+        candidate_id = chosen["task_spec"]["candidate"]["candidate_id"]
+        gold = root / "batch/gold" / candidate_id / "workspace"
+        caller = next(iter(chosen["task_spec"]["metadata"]["call_counts"]))
+        shutil.copy2(root / "batch/source" / caller, gold / caller)
+        verifier_spec = json.loads((root / "batch" / chosen["verifier"]["spec"]).read_text(encoding="utf-8"))
+        assert not Evaluator().evaluate(verify(gold, verifier_spec)).passed
+        exported = prepare_rollout(root / "batch", rows[0]["instance_id"], root / "solver")
+        solver = Path(exported["output"])
+        assert {path.name for path in solver.iterdir()} == {"repository", "task.md", "environment.json"}
+        published = publish_run(root / "batch", root / "published")
+        assert {path.name for path in published} == {row["instance_id"] for row in rows}
+        for path in published:
+            only_row = json.loads((path / "instances.jsonl").read_text(encoding="utf-8"))
+            cid = only_row["task_spec"]["candidate"]["candidate_id"]
+            assert (path / only_row["gold_patch"]["artifact"]).is_file()
+            assert {child.name for child in (path / "tasks").iterdir()} == {cid}
+            assert json.loads((path / "repository.json").read_text(encoding="utf-8"))["snapshot"] == str(path / "source")
+            assert str(path / "baseline" / "tests.json") in json.loads((path / "baseline" / "result.json").read_text(encoding="utf-8"))["argv"]
+            assert len(json.loads((path / "instances.json").read_text(encoding="utf-8"))) == 1
+            assert prepare_rollout(path, only_row["instance_id"], root / ("solver-" + cid))["instance_id"] == only_row["instance_id"]
+        assert (solver / "task.md").read_text(encoding="utf-8").strip() == rows[0]["problem_statement"]["text"]
+        assert not any((solver / name).exists() for name in ("gold", "tasks", "oracle.json", "precheck"))
+        with pytest.raises(FileExistsError):
+            prepare_rollout(root / "batch", rows[0]["instance_id"], solver)

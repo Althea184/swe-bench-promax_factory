@@ -1,4 +1,4 @@
-"""Conservative, deterministic pilot for a two-argument Python API migration."""
+"""Conservative API signature migration across static Python import graphs."""
 import ast
 import difflib
 import re
@@ -8,149 +8,154 @@ from pathlib import Path
 from .common import FactoryError, digest, relative
 from .models import Candidate, FileChange, GoldPatch, TaskSpec
 from .repository import IGNORED
+from .usage_analysis import UsageIndex
+
+
+def recipe_for(config, candidate):
+    return next((item for item in config.api_migrations
+                 if (item.module.replace(".", "/") + ".py" == candidate.path
+                     or item.module.replace(".", "/") + "/__init__.py" == candidate.path)
+                 and item.symbol == candidate.symbol), None)
 
 
 class ApiMigrationDiscovery:
-    """Accept only a module-level function and direct imports in two or more modules."""
-    old_api = "render_amount"
-    new_api = "format_amount"
-
+    """Find configured APIs and supported static usages; leave quality cuts to filtering."""
     def discover(self, repo, config):
         candidates, diagnostics = [], []
-        for path in sorted(repo.files):
-            if not path.endswith(".py") or path.startswith(config.test_dir + "/"):
+        for recipe in config.api_migrations:
+            path = recipe.module.replace(".", "/") + ".py"
+            if path not in repo.files and recipe.module.replace(".", "/") + "/__init__.py" in repo.files:
+                path = recipe.module.replace(".", "/") + "/__init__.py"
+            if path not in repo.files:
+                diagnostics.append({"path": path, "error": "configured API module missing"})
                 continue
             try:
                 tree = ast.parse((repo.snapshot / path).read_text(encoding="utf-8"))
-            except (UnicodeError, SyntaxError) as exc:
+                functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == recipe.symbol]
+                if len(functions) != 1:
+                    raise ValueError("configured API definition missing or ambiguous")
+                fn = functions[0]
+                if (fn.decorator_list or fn.args.posonlyargs or len(fn.args.args) != 2
+                        or fn.args.args[1].arg != recipe.parameter or len(fn.args.defaults) > 1
+                        or fn.args.kwonlyargs or fn.args.vararg or fn.args.kwarg):
+                    raise ValueError("unsupported API signature")
+                index = UsageIndex(repo.snapshot, repo.files, recipe.module, recipe.symbol)
+                calls = index.call_sites()
+                if recipe.symbol != recipe.target_symbol and any(
+                        name != recipe.module and index.exports(name, recipe.symbol)
+                        and any(isinstance(node, ast.ImportFrom) and node.module == name
+                                and any(alias.name == recipe.symbol for alias in node.names)
+                                for tree in index.trees.values() for node in tree.body)
+                        for name in index.trees):
+                    raise ValueError("renamed API through re-export is unsupported")
+                if any(len(call.args) != 2 or call.keywords for nodes in calls.values() for call in nodes):
+                    raise ValueError("unsupported target call shape")
+            except (OSError, UnicodeError, SyntaxError, ValueError) as exc:
                 diagnostics.append({"path": path, "error": str(exc)})
                 continue
-            functions = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == self.old_api]
-            if len(functions) != 1:
-                continue
-            fn = functions[0]
-            if (fn.decorator_list or len(fn.args.posonlyargs) or len(fn.args.args) != 2
-                    or fn.args.defaults or fn.args.kwonlyargs or fn.args.vararg or fn.args.kwarg):
-                diagnostics.append({"path": path, "error": "unsupported API signature"})
-                continue
-            module = Path(path).stem
-            caller_diagnostics = []
-            callers = self._callers(repo, config, module, caller_diagnostics)
-            diagnostics.extend(caller_diagnostics)
-            if len(callers) < 2:
-                diagnostics.append({"path": path, "error": "fewer than two direct-import caller modules"})
-                continue
-            identity = digest(f"{repo.content_sha256}:{path}:{fn.lineno}:api-migration-v1".encode())[:20]
+            identity = digest(f"{repo.content_sha256}:{path}:{fn.lineno}:{recipe.symbol}:api-migration-v2".encode())[:20]
+            metrics = {"caller_modules": len(calls), "public_api_usages": sum(map(len, calls.values())),
+                       "potential_files": len(calls) + 1, "dependency_depth": index.dependency_depth(),
+                       "behavioral_invariants": len(recipe.behavioral_invariants),
+                       "changes_calling_convention": True}
             candidates.append(Candidate(identity, path, fn.name, fn.lineno, fn.end_lineno, repo.files[path],
-                                        f"Direct imports and calls in {len(callers)} modules", "api-migration-v1"))
+                                        f"API used in {len(calls)} production modules", "api-migration-v2", metrics))
         return candidates, diagnostics
-
-    def _callers(self, repo, config, module, diagnostics=None):
-        result = {}
-        for path in sorted(repo.files):
-            if not path.endswith(".py") or path.startswith(config.test_dir + "/") or Path(path).stem == module:
-                continue
-            try:
-                tree = ast.parse((repo.snapshot / path).read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, SyntaxError) as exc:
-                if diagnostics is not None:
-                    diagnostics.append({"path": path, "error": str(exc)})
-                continue
-            imports = [a for n in tree.body if isinstance(n, ast.ImportFrom) and n.module == module
-                       for a in n.names if a.name == self.old_api and a.asname is None]
-            calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                     and n.func.id == self.old_api and len(n.args) == 2 and not n.keywords]
-            # Reject references that a direct-name rewrite would leave ambiguous.
-            names = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == self.old_api]
-            if len(imports) == 1 and calls and len(names) == len(calls):
-                result[path] = len(calls)
-        return result
 
 
 class ApiMigrationSpecBuilder:
     def build(self, repo, candidate, config):
-        if candidate.strategy != "api-migration-v1" or repo.files.get(candidate.path) != candidate.source_sha256:
+        recipe = recipe_for(config, candidate)
+        if candidate.strategy != "api-migration-v2" or repo.files.get(candidate.path) != candidate.source_sha256 or recipe is None:
             raise FactoryError("Stale or unsupported migration candidate")
-        discovery = ApiMigrationDiscovery()
-        callers = discovery._callers(repo, config, Path(candidate.path).stem)
-        if len(callers) < 2:
-            raise FactoryError("Migration needs two caller modules")
-        return TaskSpec(candidate, "api_migration",
-                        "Use clearer naming for the public amount-formatting API and migrate dependent callers.",
-                        (candidate.path, *callers),
-                        {"api_module": candidate.path, "current_api": discovery.old_api,
-                         "target_api": discovery.new_api},
-                        ("Expose the replacement API with keyword-only currency.",
-                         "Migrate dependent direct imports and calls.", "Remove the old API definition."),
-                        ("Preserve formatted output and validation errors.",
-                         "Keep existing regression tests passing."),
-                        ("Dependent callers must use the replacement API and supply currency explicitly by name.",),
-                        {"strategy": "python-api-migration-v1", "call_counts": callers})
+        index = UsageIndex(repo.snapshot, repo.files, recipe.module, recipe.symbol)
+        calls = index.call_sites()
+        if len(calls) < config.min_caller_modules:
+            raise FactoryError("Migration has too few caller modules")
+        structure = (f"Make {recipe.parameter} keyword-only on the public API.",
+                     "Migrate all production calls to the new calling convention.")
+        if recipe.symbol != recipe.target_symbol:
+            structure += ("Replace the old public API name across imports and calls.",)
+        return TaskSpec(candidate, "api_migration", recipe.goal,
+                        (candidate.path, *sorted(calls)),
+                        {"api_module": candidate.path, "module": recipe.module,
+                         "current_api": recipe.symbol, "target_api": recipe.target_symbol,
+                         "keyword_parameter": recipe.parameter},
+                        structure, recipe.behavioral_invariants, recipe.compatibility_requirements,
+                        {"strategy": "python-api-migration-v2", "call_counts": {path: len(nodes) for path, nodes in calls.items()},
+                         "functional_cases": recipe.functional_cases, "dependency_depth": index.dependency_depth()})
 
 
 class ApiMigrationGoldGenerator:
     def generate(self, repo, spec):
-        api_module = spec.entities["api_module"]
-        old_api = spec.entities["current_api"]
-        new_api = spec.entities["target_api"]
-        call_counts = spec.metadata["call_counts"]
+        api_path = spec.entities["api_module"]
+        module = spec.entities["module"]
+        old = spec.entities["current_api"]
+        new = spec.entities["target_api"]
+        parameter = spec.entities["keyword_parameter"]
+        index = UsageIndex(repo.snapshot, repo.files, module, old)
+        sites = index.call_sites()
+        if set(sites) != set(spec.scope) - {api_path}:
+            raise FactoryError("Call graph changed after specification")
         changes = []
-        for path in spec.scope:
+        paths = list(spec.scope)
+        if old != new:
+            for candidate_path in repo.files:
+                if candidate_path.endswith(".py") and candidate_path not in paths:
+                    tree = index.trees.get(candidate_path.removesuffix(".py").replace("/", "."))
+                    if tree and any(isinstance(node, ast.ImportFrom) and node.module == module
+                                    and any(alias.name == old for alias in node.names) for node in tree.body):
+                        paths.append(candidate_path)
+        for path in paths:
             with (repo.snapshot / path).open("r", encoding="utf-8", newline="") as stream:
                 source = stream.read()
             tree = ast.parse(source)
-            edits = []
             lines = source.splitlines(keepends=True)
             starts = [0]
             for line in lines:
                 starts.append(starts[-1] + len(line.encode("utf-8")))
 
-            def pos(lineno, column):
-                return starts[lineno - 1] + column
+            def pos(line, column):
+                return starts[line - 1] + column
 
-            def replace(node, replacement):
-                edits.append((pos(node.lineno, node.col_offset), pos(node.end_lineno, node.end_col_offset), replacement.encode()))
+            edits = []
 
-            if path == api_module:
-                targets = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == old_api]
-                if len(targets) != 1:
-                    raise FactoryError("API definition changed")
-                fn = targets[0]
-                if fn.decorator_list or len(fn.args.args) != 2 or fn.args.defaults or fn.args.kwonlyargs:
-                    raise FactoryError("Unsupported API definition")
-                currency = fn.args.args.pop()
-                header = lines[fn.lineno - 1].encode("utf-8")
-                match = re.search(rb"\bdef\s+" + old_api.encode() + rb"\b", header)
-                if match is None:
-                    raise FactoryError("Unsupported API definition layout")
-                start = starts[fn.lineno - 1] + match.end() - len(old_api)
-                edits.append((start, start + len(old_api), new_api.encode()))
-                edits.append((pos(currency.lineno, currency.col_offset), pos(currency.lineno, currency.col_offset), b"*, "))
+            def replace(node, value):
+                edits.append((pos(node.lineno, node.col_offset), pos(node.end_lineno, node.end_col_offset), value.encode()))
+
+            if path == api_path:
+                fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == old)
+                argument = fn.args.args[1]
+                edits.append((pos(argument.lineno, argument.col_offset), pos(argument.lineno, argument.col_offset), b"*, "))
+                if old != new:
+                    header = lines[fn.lineno - 1].encode("utf-8")
+                    match = re.search(rb"\bdef\s+" + old.encode() + rb"\b", header)
+                    if match is None:
+                        raise FactoryError("Unsupported API definition layout")
+                    start = starts[fn.lineno - 1] + match.end() - len(old)
+                    edits.append((start, start + len(old), new.encode()))
             else:
-                imports = 0
-                calls = 0
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.ImportFrom) and node.module == Path(api_module).stem:
-                        for alias in node.names:
-                            if alias.name == old_api and alias.asname is None:
-                                replace(alias, new_api)
-                                imports += 1
-                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == old_api:
-                        if len(node.args) != 2 or node.keywords:
-                            raise FactoryError("Unsupported call shape")
-                        replace(node.func, new_api)
-                        second = node.args[1]
-                        edits.append((pos(second.lineno, second.col_offset), pos(second.lineno, second.col_offset), b"currency="))
-                        calls += 1
-                if imports != 1 or calls != call_counts[path]:
-                    raise FactoryError("Planned call sites changed")
+                for call in sites.get(path, []):
+                    second = call.args[1]
+                    edits.append((pos(second.lineno, second.col_offset), pos(second.lineno, second.col_offset), (parameter + "=").encode()))
+                    if old != new:
+                        if isinstance(call.func, ast.Name):
+                            replace(call.func, new)
+                        elif isinstance(call.func, ast.Attribute):
+                            replace(call.func, ast.get_source_segment(source, call.func).rsplit(".", 1)[0] + "." + new)
+                if old != new:
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.ImportFrom) and node.module == module:
+                            for alias in node.names:
+                                if alias.name == old and alias.asname is None:
+                                    replace(alias, new)
             raw = source.encode("utf-8")
             for start, end, replacement in sorted(edits, reverse=True):
                 raw = raw[:start] + replacement + raw[end:]
             after = raw.decode("utf-8")
             ast.parse(after)
             if after == source:
-                raise FactoryError("Gold transformation produced no change")
+                continue
             diff = list(difflib.unified_diff(source.splitlines(keepends=True), after.splitlines(keepends=True),
                                               fromfile=f"a/{path}", tofile=f"b/{path}"))
             added = sum(line.startswith("+") and not line.startswith("+++") for line in diff)
@@ -158,22 +163,24 @@ class ApiMigrationGoldGenerator:
             changes.append(FileChange(path, digest(source.encode()), digest(after.encode()), source, after, added, deleted))
         patch_text = render_patch(changes)
         return GoldPatch(tuple(changes), digest(patch_text.encode()),
-                         {"strategy": spec.metadata["strategy"], "old_api": old_api, "new_api": new_api,
-                          "call_counts": call_counts})
+                         {"strategy": spec.metadata["strategy"], "old_api": old, "new_api": new,
+                          "keyword_parameter": parameter, "call_counts": spec.metadata["call_counts"]})
 
 
 def render_patch(changes):
-    return "".join(line for change in changes for line in difflib.unified_diff(
-        change.before.splitlines(keepends=True), change.after.splitlines(keepends=True),
-        fromfile=f"a/{change.path}", tofile=f"b/{change.path}"))
+    return "".join(
+        f"diff --git a/{change.path} b/{change.path}\n" + "".join(difflib.unified_diff(
+            change.before.splitlines(keepends=True), change.after.splitlines(keepends=True),
+            fromfile=f"a/{change.path}", tofile=f"b/{change.path}"))
+        for change in changes)
 
 
 class PatchApplier:
     def apply(self, repo, patch, workspace: Path):
         if workspace.exists():
             raise FactoryError("Gold workspace already exists")
-        paths = [relative(c.path) for c in patch.changes]
-        if len(paths) != len(set(paths)) or len(paths) < 3 or digest(render_patch(patch.changes).encode()) != patch.patch_sha256:
+        paths = [relative(change.path) for change in patch.changes]
+        if len(paths) != len(set(paths)) or not paths or digest(render_patch(patch.changes).encode()) != patch.patch_sha256:
             raise FactoryError("Invalid gold patch manifest")
         for change in patch.changes:
             source = repo.snapshot / change.path

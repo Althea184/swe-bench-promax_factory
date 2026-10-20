@@ -1,5 +1,5 @@
 """Data passed between synthesis stages. Paths in specs are repository relative."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from .common import relative
 
@@ -22,6 +22,7 @@ class Candidate:
     source_sha256: str
     reason: str
     strategy: str
+    metrics: dict = field(default_factory=dict)
 
     def __post_init__(self):
         relative(self.path)
@@ -102,6 +103,7 @@ class PrecheckResult:
     gold: Evaluation
     noop: Evaluation
     passed: bool
+    reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -115,6 +117,7 @@ class Instance:
     verifier: dict
     precheck: PrecheckResult
     environment: dict
+    difficulty_metadata: dict = field(default_factory=dict)
     schema_version: str = "rf.instance.v3"
     status: str = "precheck_passed"
 

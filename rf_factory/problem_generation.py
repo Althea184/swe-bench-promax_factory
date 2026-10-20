@@ -27,6 +27,8 @@ class ProblemGenerator:
         paths = [path for path in spec.scope if Path(path).name in text]
         if paths:
             issues.append("implementation file paths")
-        if spec.entities.get("current_api", "") in text and spec.entities.get("target_api", "") in text:
+        if (spec.entities.get("current_api") != spec.entities.get("target_api")
+                and spec.entities.get("current_api", "") in text
+                and spec.entities.get("target_api", "") in text):
             issues.append("exact API transformation")
         return {"passed": not issues, "issues": issues, "abstraction_level": "medium"}

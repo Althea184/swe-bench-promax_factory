@@ -1,30 +1,83 @@
 import argparse
 import logging
 from pathlib import Path
+import shutil
 import sys
+from uuid import uuid4
 from .common import FactoryError, dumps
 from .config import Config
 from .pipeline import Pipeline
+from .rollout import prepare_rollout
+from .real_pipeline import RealPipeline
+from .publish import publish_run
+
+
+def run_and_publish(args, config=None):
+    output_root = args.output.resolve()
+    work_root = output_root.parent / ".rf-factory-work"
+    work_root.mkdir(parents=True, exist_ok=True)
+    staging = work_root / uuid4().hex
+    if args.command == "run-real":
+        import shlex
+        result = RealPipeline().run(repo_url=args.repo_url, output=staging, commit=args.commit,
+                                    local_path=args.local_path, test_argv=shlex.split(args.test_command),
+                                    max_candidates=args.max_candidates, base_image=args.base_image,
+                                    offline_build=args.offline_build)
+    else:
+        result = Pipeline().run(config, staging)
+    if result["status"] != "completed":
+        result["work_directory"] = str(staging)
+        return result
+    destinations = publish_run(staging, output_root)
+    if staging.resolve().is_relative_to(work_root.resolve()):
+        shutil.rmtree(staging)
+    result["instance_directories"] = [str(path) for path in destinations]
+    if len(destinations) == 1:
+        result["output"] = str(destinations[0] / "instances.jsonl")
+    else:
+        result.pop("output", None)
+    return result
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Experimental RF instance synthesis")
     commands = parser.add_subparsers(dest="command", required=True)
     demo = commands.add_parser("demo", help="Run the full pipeline on the bundled API migration fixture")
-    demo.add_argument("--output", required=True, type=Path)
+    demo.add_argument("--output", required=True, type=Path, help="Directory containing instance-ID folders")
     run = commands.add_parser("run", help="Run against a trusted local repository")
     run.add_argument("--config", required=True, type=Path)
-    run.add_argument("--output", required=True, type=Path)
+    run.add_argument("--output", required=True, type=Path, help="Directory containing instance-ID folders")
+    real = commands.add_parser("run-real", help="Synthesize from a fixed public GitHub Python repository in Docker")
+    real.add_argument("--repo-url", required=True)
+    real.add_argument("--commit")
+    real.add_argument("--local-path", type=Path, help="Existing local clone of the GitHub repository")
+    real.add_argument("--output", required=True, type=Path, help="Directory containing instance-ID folders")
+    real.add_argument("--test-command", default="python -m unittest discover -s tests")
+    real.add_argument("--max-candidates", type=int, default=5)
+    real.add_argument("--base-image", default="python:3.11-slim")
+    real.add_argument("--offline-build", action="store_true")
     check = commands.add_parser("validate-config")
     check.add_argument("--config", required=True, type=Path)
+    rollout = commands.add_parser("prepare-rollout", help="Export base repository and solver-visible task only")
+    rollout.add_argument("--run", required=True, type=Path)
+    rollout.add_argument("--instance", required=True)
+    rollout.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
+        if args.command == "prepare-rollout":
+            result = prepare_rollout(args.run, args.instance, args.output)
+            print(dumps(result, indent=2))
+            return 0
+        if args.command == "run-real":
+            result = run_and_publish(args)
+            print(dumps(result, indent=2))
+            return 0
         if args.command == "demo":
             config = Config(Path(__file__).with_name("fixtures") / "api_migration_repo")
         else:
             config = Config.load(args.config)
-        result = {"valid": True} if args.command == "validate-config" else Pipeline().run(config, args.output)
+        result = {"valid": True} if args.command == "validate-config" else run_and_publish(args, config)
         print(dumps(result, indent=2))
         return 1 if result.get("status") == "no_valid_instances" else 0
     except (FactoryError, OSError, ValueError, TypeError) as exc:

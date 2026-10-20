@@ -1,0 +1,171 @@
+[repository]
+source = "../rf_factory/fixtures/commerce_repo"
+
+[pipeline]
+refactoring_type = "api_migration"
+discovery_strategy = "api_migration"
+ranking_policy = "stable_path"
+max_candidates = 10
+min_caller_modules = 4
+min_changed_files = 5
+abstraction_level = "medium"
+test_dir = "tests"
+test_pattern = "test*.py"
+test_timeout = 30
+
+[[api_migrations]]
+module = "shop.core.shipping"
+symbol = "shipping_cost"
+target_symbol = "shipping_cost"
+parameter = "zone"
+goal = "Migrate the public shipping quote API so delivery zone is supplied by name throughout order processing, reporting, and external integrations."
+behavioral_invariants = ["Preserve domestic defaults, weight-based handling, and the existing rates for all supported zones.", "Reject invalid weights and unsupported zones with the same errors.", "Keep end-to-end regression tests passing."]
+compatibility_requirements = ["All dependent callers must use the keyword-only zone convention."]
+[[api_migrations.functional_cases]]
+args = [2]
+kwargs = {zone = "domestic"}
+expected = 4.0
+[[api_migrations.functional_cases]]
+args = [2]
+expected = 4.0
+[[api_migrations.functional_cases]]
+args = [11]
+kwargs = {zone = "international"}
+expected = 78.5
+[[api_migrations.functional_cases]]
+args = [0]
+kwargs = {zone = "domestic"}
+raises = "ValueError"
+message = "weight must be positive"
+[[api_migrations.functional_cases]]
+args = [2]
+kwargs = {zone = "moon"}
+raises = "ValueError"
+message = "unsupported zone"
+[[api_migrations.functional_cases]]
+args = [2, "domestic"]
+raises = "TypeError"
+
+[[api_migrations]]
+module = "shop.core.tax"
+symbol = "tax_due"
+target_symbol = "tax_due"
+parameter = "region"
+goal = "Migrate the public tax estimation API to require an explicit named region across checkout, refunds, reports, and partner integrations."
+behavioral_invariants = ["Preserve region-specific rates and zero tax for exports.", "Keep negative amounts and unsupported regions rejected with the same error behavior.", "Keep higher-level order and refund results unchanged."]
+compatibility_requirements = ["Dependent callers must supply region by keyword under the new convention."]
+[[api_migrations.functional_cases]]
+args = [100]
+kwargs = {region = "north"}
+expected = 8.0
+[[api_migrations.functional_cases]]
+args = [100]
+kwargs = {region = "export"}
+expected = 0.0
+[[api_migrations.functional_cases]]
+args = [-1]
+kwargs = {region = "south"}
+raises = "ValueError"
+message = "amount must be nonnegative"
+[[api_migrations.functional_cases]]
+args = [5]
+kwargs = {region = "moon"}
+raises = "ValueError"
+message = "unsupported region"
+[[api_migrations.functional_cases]]
+args = [100, "north"]
+raises = "TypeError"
+
+[[api_migrations]]
+module = "shop.core.discount"
+symbol = "apply_discount"
+target_symbol = "apply_discount"
+parameter = "tier"
+goal = "Migrate the public loyalty pricing API so customer tier is passed explicitly by name throughout pricing, refund, reporting, and partner flows."
+behavioral_invariants = ["Preserve the default standard tier and existing silver and gold discounts.", "Preserve rounding and errors for invalid amounts or unknown tiers.", "Keep customer-facing totals unchanged."]
+compatibility_requirements = ["Dependent callers must follow the keyword-only tier convention."]
+[[api_migrations.functional_cases]]
+args = [100]
+kwargs = {tier = "gold"}
+expected = 88.0
+[[api_migrations.functional_cases]]
+args = [100]
+kwargs = {tier = "standard"}
+expected = 100.0
+[[api_migrations.functional_cases]]
+args = [100]
+expected = 100.0
+[[api_migrations.functional_cases]]
+args = [-1]
+kwargs = {tier = "silver"}
+raises = "ValueError"
+message = "amount must be nonnegative"
+[[api_migrations.functional_cases]]
+args = [5]
+kwargs = {tier = "platinum"}
+raises = "ValueError"
+message = "unsupported tier"
+[[api_migrations.functional_cases]]
+args = [100, "gold"]
+raises = "TypeError"
+
+[[api_migrations]]
+module = "shop.core.inventory"
+symbol = "allocate_stock"
+target_symbol = "allocate_stock"
+parameter = "requested"
+goal = "Migrate the public stock allocation API so requested units are named explicitly across fulfillment, returns, reports, jobs, and partner flows."
+behavioral_invariants = ["Preserve remaining-stock calculations for valid integer quantities.", "Preserve errors for non-integer quantities, nonpositive requests, and insufficient stock.", "Keep order and warehouse workflows working as before."]
+compatibility_requirements = ["Every dependent caller must use the keyword-only requested-units convention."]
+[[api_migrations.functional_cases]]
+args = [10]
+kwargs = {requested = 2}
+expected = 8
+[[api_migrations.functional_cases]]
+args = [2]
+kwargs = {requested = 3}
+raises = "ValueError"
+message = "insufficient stock"
+[[api_migrations.functional_cases]]
+args = [10]
+kwargs = {requested = 0}
+raises = "ValueError"
+message = "requested units must be positive"
+[[api_migrations.functional_cases]]
+args = [10]
+kwargs = {requested = 1.5}
+raises = "TypeError"
+message = "stock quantities must be integers"
+[[api_migrations.functional_cases]]
+args = [10, 2]
+raises = "TypeError"
+
+[[api_migrations]]
+module = "shop.core.notice"
+symbol = "dispatch_notice"
+target_symbol = "dispatch_notice"
+parameter = "status"
+goal = "Migrate the public dispatch notification API so status is passed by name across fulfillment, customer entrypoints, reports, jobs, and integrations."
+behavioral_invariants = ["Preserve the exact queued, shipped, and delivered customer messages.", "Preserve errors for unsupported statuses and missing order identifiers.", "Keep existing order workflows and partner responses unchanged."]
+compatibility_requirements = ["Dependent callers must use the keyword-only status convention."]
+[[api_migrations.functional_cases]]
+args = ["A1"]
+kwargs = {status = "shipped"}
+expected = "Order A1: shipped"
+[[api_migrations.functional_cases]]
+args = ["A1"]
+kwargs = {status = "queued"}
+expected = "Order A1: queued"
+[[api_migrations.functional_cases]]
+args = ["A1"]
+kwargs = {status = "lost"}
+raises = "ValueError"
+message = "unsupported dispatch status"
+[[api_migrations.functional_cases]]
+args = [""]
+kwargs = {status = "queued"}
+raises = "ValueError"
+message = "order id is required"
+[[api_migrations.functional_cases]]
+args = ["A1", "shipped"]
+raises = "TypeError"

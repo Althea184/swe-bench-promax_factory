@@ -221,3 +221,5 @@ __marimo__/
 
 # Local synthesis evidence
 runs/
+.rf-factory-work/
+run-archive/

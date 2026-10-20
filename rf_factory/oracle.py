@@ -59,12 +59,13 @@ class OracleBuilder:
         if spec.refactoring_type != "api_migration":
             raise ValueError(f"Unsupported oracle strategy: {spec.refactoring_type}")
         checks = {"api_module": spec.entities["api_module"],
+                  "module": spec.entities["module"],
                   "old_api": spec.entities["current_api"],
                   "new_api": spec.entities["target_api"],
+                  "keyword_parameter": spec.entities["keyword_parameter"],
                   "call_counts": spec.metadata["call_counts"],
                   "base_hashes": {path: repo.files[path] for path in spec.scope},
-                  "functional_inputs": [[12.5, "USD"], [0, "EUR"]],
-                  "functional_expected": ["$12.50", "€0.00"]}
+                  "functional_cases": spec.metadata["functional_cases"]}
         return Oracle("python-api-migration-v1", checks, config.test_dir, config.test_pattern, config.test_timeout)
 
     @staticmethod

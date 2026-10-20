@@ -10,4 +10,13 @@ class Evaluator:
                           checks, report["details"])
 
     def precheck(self, gold, noop):
-        return PrecheckResult(gold, noop, gold.passed and not noop.passed)
+        reasons = []
+        if not gold.passed:
+            reasons.append("gold verification failed")
+        if noop.passed:
+            reasons.append("unchanged repository passed")
+        independent_failures = sum(not value for name, value in noop.checks.items()
+                                   if name == "new_api_signature" or name.startswith("caller:") or name == "functional_api")
+        if independent_failures < 2:
+            reasons.append("no-op distinction is too weak")
+        return PrecheckResult(gold, noop, not reasons, tuple(reasons))
