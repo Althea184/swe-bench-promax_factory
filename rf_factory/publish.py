@@ -1,10 +1,12 @@
-"""Publish successful synthesis runs as one self-contained directory per instance."""
+"""Publish lightweight instances with one shared source per local batch."""
 import json
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
-from .common import FactoryError, write_json
+from .common import FactoryError, digest, dumps, write_json
+from .repository import manifest
 
 
 def publish_run(staging: Path, output_root: Path) -> list[Path]:
@@ -24,13 +26,72 @@ def publish_run(staging: Path, output_root: Path) -> list[Path]:
         raise FileExistsError("Instance output already exists")
 
     real = (staging / "swe-bench-promax.json").exists()
+    base_id = None
+    shared_base = None
+    if not real:
+        hashes = {row["repository"]["content_sha256"] for row in rows}
+        if len(hashes) != 1 or not re.fullmatch(r"[0-9a-f]{64}", next(iter(hashes))):
+            raise FactoryError("Local batch needs one valid shared source hash")
+        base_id = next(iter(hashes))
+        shared_base = output_root / "_bases" / base_id / "source"
+        if not shared_base.exists():
+            shared_base.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(staging / "source", shared_base)
+        if digest(dumps(manifest(shared_base), sort_keys=True).encode()) != base_id:
+            raise FactoryError("Shared source hash mismatch")
+        base_image = "rf-factory-base:" + base_id[:16]
+        base_dockerfile = shared_base.parent / "Dockerfile"
+        base_dockerfile.write_text("FROM python:3.11-slim\nWORKDIR /work\nCOPY source/ /work/\n", encoding="utf-8")
+        try:
+            build = subprocess.run(["docker", "build", "-t", base_image, str(shared_base.parent)],
+                                   capture_output=True, text=True, timeout=180)
+            build_error = (build.stderr or build.stdout)[-1000:]
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            build = None
+            build_error = str(exc)
+        image_id = None
+        if build is not None and build.returncode == 0:
+            try:
+                inspect = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", base_image],
+                                         capture_output=True, text=True, timeout=20)
+                if inspect.returncode == 0:
+                    image_id = inspect.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                build_error = str(exc)
+        write_json(shared_base.parent / "base.json", {"content_sha256": base_id, "image_name": base_image,
+                   "image_id": image_id, "status": "ready" if image_id else "unavailable",
+                   "error": None if image_id else build_error})
     published = []
     active_destination = None
+    def skip_workspaces(directory, names):
+        current = Path(directory)
+        if current == staging:
+            return {"source", "acquired"} & set(names)
+        if current.parent == staging / "attempts":
+            return {name for name in names if name == "workspace" or name.startswith("step-")}
+        if current == staging / "baseline":
+            return {"workspace"} & set(names)
+        if current.parent in {staging / "gold", staging / "precheck"}:
+            return {"workspace", "noop_workspace"} & set(names)
+        return set()
+
     try:
         for row, destination in zip(rows, destinations):
             active_destination = destination
-            shutil.copytree(staging, destination)
+            shutil.copytree(staging, destination, ignore=skip_workspaces)
+            for path in (destination / "baseline" / "workspace",):
+                if path.exists():
+                    shutil.rmtree(path)
+            for directory, name in (("gold", "workspace"), ("precheck", "noop_workspace")):
+                parent = destination / directory
+                if parent.exists():
+                    for path in parent.glob(f"*/{name}"):
+                        shutil.rmtree(path)
             if not real:
+                row["repository"]["snapshot"] = None
+                row["repository"]["shared_base"] = base_id
+                row["environment"]["shared_base_image"] = base_image
+                row["environment"]["shared_base_image_id"] = image_id
                 candidate_id = row["task_spec"]["candidate"]["candidate_id"]
                 for directory in ("tasks", "gold", "precheck", "verifier", "docker"):
                     parent = destination / directory
@@ -54,7 +115,11 @@ def publish_run(staging: Path, output_root: Path) -> list[Path]:
                     docker = json.loads(docker_path.read_text(encoding="utf-8"))
                     docker["instances"] = [item for item in docker.get("instances", []) if item["instance_id"] == row["instance_id"]]
                     write_json(docker_path, docker)
-                shutil.copy2(destination / row["environment"]["dockerfile"], destination / "Dockerfile")
+                dockerfile = (f"FROM {base_image}\n"
+                              f"COPY verifier/{candidate_id}/ /verifier/\n"
+                              'CMD ["python", "/verifier/runner.py", "/work", "/verifier/spec.json"]\n')
+                (destination / row["environment"]["dockerfile"]).write_text(dockerfile, encoding="utf-8")
+                (destination / "Dockerfile").write_text(dockerfile, encoding="utf-8")
                 for filename in ("candidates.json", "selected_candidates.json"):
                     path = destination / filename
                     if path.exists():
@@ -67,7 +132,7 @@ def publish_run(staging: Path, output_root: Path) -> list[Path]:
                         write_json(path, [item for item in values if item["candidate_id"] == candidate_id])
                 repo_path = destination / "repository.json"
                 repo = json.loads(repo_path.read_text(encoding="utf-8"))
-                repo["snapshot"] = str(destination / "source")
+                repo["snapshot"] = f"../_bases/{base_id}/source"
                 write_json(repo_path, repo)
                 baseline_path = destination / "baseline" / "result.json"
                 if baseline_path.exists():
@@ -81,6 +146,14 @@ def publish_run(staging: Path, output_root: Path) -> list[Path]:
                                gold_patch_success=1, gold_pass=1, noop_fail=1, exported=1,
                                rejected=0, output=str(destination / "instances.jsonl"))
                 write_json(summary_path, summary)
+            else:
+                environment = json.loads((destination / "environment.json").read_text(encoding="utf-8"))
+                row["repository"] = {"repo_url": environment.get("repo_url"),
+                                     "base_commit": environment["base_commit"],
+                                     "image_id": environment["image_id"]}
+                write_json(destination / "repository.json",
+                           {**json.loads((destination / "repository.json").read_text(encoding="utf-8")),
+                            "source_storage": "shared_docker_image", "image_id": environment["image_id"]})
             (destination / "instances.jsonl").write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
             published.append(destination)
             active_destination = None

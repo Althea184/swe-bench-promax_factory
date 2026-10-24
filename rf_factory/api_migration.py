@@ -127,6 +127,18 @@ class ApiMigrationGoldGenerator:
                 fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == old)
                 argument = fn.args.args[1]
                 edits.append((pos(argument.lineno, argument.col_offset), pos(argument.lineno, argument.col_offset), b"*, "))
+                # UsageIndex excludes the defining module. Direct calls there still
+                # need migration (for example a helper calling another public API).
+                for node in ast.walk(tree):
+                    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                            and node.func.id == old):
+                        if len(node.args) != 2 or node.keywords:
+                            raise FactoryError("Unsupported same-module call shape")
+                        second = node.args[1]
+                        edits.append((pos(second.lineno, second.col_offset),
+                                      pos(second.lineno, second.col_offset), (parameter + "=").encode()))
+                        if old != new:
+                            replace(node.func, new)
                 if old != new:
                     header = lines[fn.lineno - 1].encode("utf-8")
                     match = re.search(rb"\bdef\s+" + old.encode() + rb"\b", header)

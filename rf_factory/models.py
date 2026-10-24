@@ -55,6 +55,29 @@ class TaskSpec:
 
 
 @dataclass(frozen=True)
+class CompoundTaskSpec:
+    """Private contract for one instance composed from ordered task contracts."""
+    subtasks: tuple[TaskSpec, ...]
+    dependency_edges: tuple[tuple[str, str], ...]
+    goal: str
+    scope: tuple[str, ...]
+    metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if len(self.subtasks) != 2 or any(task.refactoring_type != "api_migration" for task in self.subtasks):
+            raise ValueError("Compound MVP requires exactly two API migrations")
+        ids = [task.candidate.candidate_id for task in self.subtasks]
+        if len(set(ids)) != 2 or not self.goal.strip():
+            raise ValueError("Invalid compound task identity or goal")
+        if set(self.scope) != set().union(*(set(task.scope) for task in self.subtasks)):
+            raise ValueError("Compound scope must cover both subtasks")
+        for path in self.scope:
+            relative(path)
+        if any(a not in ids or b not in ids or a == b for a, b in self.dependency_edges):
+            raise ValueError("Invalid compound dependency edge")
+
+
+@dataclass(frozen=True)
 class ProblemStatement:
     text: str
     abstraction_level: str

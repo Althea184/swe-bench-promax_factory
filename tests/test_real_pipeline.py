@@ -56,7 +56,12 @@ def test_real_instance_published_by_id(tmp_path):
            "problem_statement": {"text": "Change the API."}, "environment": {"python": ">=3.11", "dependencies": []}}
     (staging / "instances.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
     (staging / "swe-bench-promax.json").write_text("[]\n", encoding="utf-8")
+    (staging / "environment.json").write_text(json.dumps({"repo_url": "https://github.com/owner/repo",
+        "base_commit": "1" * 40, "image_id": "sha256:" + "2" * 64,
+        "image_name": "test:base"}), encoding="utf-8")
+    (staging / "repository.json").write_text(json.dumps({"repo": "owner/repo"}), encoding="utf-8")
     published = publish_run(staging, tmp_path / "runs")
     assert published == [tmp_path / "runs" / row["instance_id"]]
-    assert (published[0] / "source" / "example.py").is_file()
-    assert (published[0] / "instances.jsonl").read_text(encoding="utf-8").strip() == json.dumps(row)
+    assert not (published[0] / "source").exists()
+    published_row = json.loads((published[0] / "instances.jsonl").read_text(encoding="utf-8"))
+    assert published_row["repository"]["image_id"] == "sha256:" + "2" * 64

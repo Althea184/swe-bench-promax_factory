@@ -17,6 +17,19 @@ class ProblemGenerator:
             raise FactoryError("Problem statement quality check failed: " + ", ".join(quality["issues"]))
         return ProblemStatement(text, "medium", "task-spec-template-v1", quality)
 
+    def generate_compound(self, spec, config):
+        """One solver-facing objective for the two private subtask contracts."""
+        if config.abstraction_level != "medium":
+            raise ValueError("Only medium abstraction is implemented")
+        invariants = dict.fromkeys(value.replace("this API", "both APIs")
+                                   for task in spec.subtasks
+                                   for value in task.behavioral_invariants)
+        text = spec.goal.rstrip(".") + ". " + " ".join(invariants)
+        quality = self.check(text, spec)
+        if not quality["passed"]:
+            raise FactoryError("Problem statement quality check failed: " + ", ".join(quality["issues"]))
+        return ProblemStatement(text, "medium", "compound-task-spec-template-v1", quality)
+
     @staticmethod
     def check(text, spec):
         issues = []
@@ -27,8 +40,9 @@ class ProblemGenerator:
         paths = [path for path in spec.scope if Path(path).name in text]
         if paths:
             issues.append("implementation file paths")
-        if (spec.entities.get("current_api") != spec.entities.get("target_api")
-                and spec.entities.get("current_api", "") in text
-                and spec.entities.get("target_api", "") in text):
+        entities = getattr(spec, "entities", {})
+        if (entities.get("current_api") != entities.get("target_api")
+                and entities.get("current_api", "") in text
+                and entities.get("target_api", "") in text):
             issues.append("exact API transformation")
         return {"passed": not issues, "issues": issues, "abstraction_level": "medium"}

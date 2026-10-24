@@ -22,6 +22,7 @@ from .usage_analysis import UsageIndex, module_name
 def command(argv, *, cwd=None, timeout=900):
     try:
         return subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
                               timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise FactoryError(f"{argv[0]} execution failed: {exc}") from exc
@@ -73,7 +74,7 @@ def discover_recipes(repo):
     return [item[2] for item in recipes], diagnostics
 
 
-def test_patch_for(spec):
+def test_patch_for(spec, path="tests/test_rf_migration.py"):
     """New test checks the requirement independently of the reference patch."""
     content = '''import ast
 import unittest
@@ -107,7 +108,6 @@ class TestRefactoringContract(unittest.TestCase):
                                     node.keywords[0].arg == PARAMETER for node in calls))
 ''' % (spec.entities["api_module"], spec.entities["target_api"],
        spec.entities["keyword_parameter"], spec.metadata["call_counts"])
-    path = "tests/test_rf_migration.py"
     lines = content.splitlines(keepends=True)
     patch = (f"diff --git a/{path} b/{path}\nnew file mode 100644\n"
              f"--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{len(lines)} @@\n" +
@@ -115,13 +115,13 @@ class TestRefactoringContract(unittest.TestCase):
     return patch
 
 
-def eval_script(test_patch, test_argv):
+def eval_script(test_patch, test_argv, test_pattern="test_rf_migration.py"):
     encoded = base64.b64encode(test_patch.encode()).decode()
     return ("#!/bin/bash\nset -uo pipefail\ncd /testbed\n"
             "export PIP_NO_INDEX=1 UV_OFFLINE=1 PYTHONPATH=/testbed\n"
             f"echo '{encoded}' | base64 -d > /tmp/rf-test.patch\n"
             "if ! git apply /tmp/rf-test.patch; then echo OMNIGRIL_TEST_PATCH_APPLY_FAILED=1; exit 1; fi\n"
-            f"{shlex.join(test_argv)} && python -m unittest discover -s tests -p test_rf_migration.py\n"
+            f"{shlex.join(test_argv)} && python -m unittest discover -s tests -p {shlex.quote(test_pattern)}\n"
             "rc=$?\necho OMNIGRIL_EXIT_CODE=$rc\nexit $rc\n")
 
 
@@ -129,7 +129,7 @@ class RealPipeline:
     def run(self, *, repo_url: str, output: Path, commit: str | None = None,
             local_path: Path | None = None, test_argv: list[str] | None = None,
             max_candidates: int = 5, base_image: str = "python:3.11-slim",
-            offline_build: bool = False):
+            offline_build: bool = False, compound: bool = False):
         if not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?", repo_url):
             raise FactoryError("repo_url must identify a public GitHub repository")
         if commit is not None and not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
@@ -149,7 +149,10 @@ class RealPipeline:
         try:
             source = str(local_path.resolve()) if local_path else repo_url
             clone = output / "acquired"
-            require(command(["git", "clone", "--no-hardlinks", "--", source, str(clone)]), "git clone")
+            clone_command = ["git"]
+            if compound:
+                clone_command += ["-c", "core.autocrlf=false"]
+            require(command(clone_command + ["clone", "--no-hardlinks", "--", source, str(clone)]), "git clone")
             if commit:
                 require(command(["git", "checkout", "--detach", commit], cwd=clone), "git checkout")
             base_commit = require(command(["git", "rev-parse", "HEAD"], cwd=clone), "git rev-parse")
@@ -192,7 +195,8 @@ class RealPipeline:
             image_commit = require(run_script("cd /testbed && git rev-parse HEAD"), "Image commit check")
             if image_commit != base_commit:
                 raise FactoryError("Docker image contains the wrong base commit")
-            write_json(output / "environment.json", {"image_name": image_name, "image_id": image_id,
+            write_json(output / "environment.json", {"repo_url": repo_url,
+                       "image_name": image_name, "image_id": image_id,
                        "base_image": base_image, "base_commit": base_commit,
                        "working_dir": "/testbed", "offline_build": offline_build,
                        "test_argv": test_argv})
@@ -203,6 +207,12 @@ class RealPipeline:
                        "stdout": baseline.stdout, "stderr": baseline.stderr})
             require(baseline, "Original regression suite")
             stage = "synthesis"
+            if compound:
+                from .compound import synthesize_compound
+                result = synthesize_compound(repo, recipes[:max_candidates], output, clone,
+                                             repo_url, base_commit, image_name, image_id,
+                                             test_argv, run_script)
+                return result
             rejected = []
             for recipe in recipes[:max_candidates]:
                 config = Config(output / "source", api_migrations=(recipe,), min_caller_modules=1,

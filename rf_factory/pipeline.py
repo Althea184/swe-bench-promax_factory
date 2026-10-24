@@ -15,6 +15,7 @@ from .verifier import verify
 from .evaluator import Evaluator
 from .instance_builder import InstanceBuilder
 from .difficulty import measure
+from .responsibility_migration import ResponsibilityDiscovery, ResponsibilitySpecBuilder, ResponsibilityGoldGenerator
 
 
 class Pipeline:
@@ -30,6 +31,14 @@ class Pipeline:
         self.instance_builder = instance_builder or InstanceBuilder()
 
     def run(self, config, output: Path):
+        if config.refactoring_type == "module_responsibility_migration":
+            self.discovery = ResponsibilityDiscovery()
+            self.spec_builder = ResponsibilitySpecBuilder()
+            self.generator = ResponsibilityGoldGenerator()
+        elif isinstance(self.discovery, ResponsibilityDiscovery):
+            self.discovery = ApiMigrationDiscovery()
+            self.spec_builder = ApiMigrationSpecBuilder()
+            self.generator = ApiMigrationGoldGenerator()
         output = output.resolve()
         if output.is_relative_to(config.source.resolve()):
             raise FactoryError("Output must be outside the source repository")

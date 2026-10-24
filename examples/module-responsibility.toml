@@ -1,0 +1,24 @@
+[repository]
+source = "../rf_factory/fixtures/responsibility_repo"
+
+[pipeline]
+refactoring_type = "module_responsibility_migration"
+discovery_strategy = "module_responsibility_migration"
+min_caller_modules = 2
+min_changed_files = 3
+
+[[responsibility_migrations]]
+source_modules = ["app.checkout", "app.refunds"]
+target_module = "app.services.pricing"
+symbol = "final_price"
+goal = "Consolidate duplicated price calculation in the shared pricing service and route checkout and refund workflows through it."
+behavioral_invariants = ["Preserve the totals returned by both workflows.", "Preserve rounding and validation errors for invalid amounts or rates.", "Keep the existing regression tests passing."]
+
+[[responsibility_migrations.functional_cases]]
+args = [100, 0.2]
+expected = 80.0
+
+[[responsibility_migrations.functional_cases]]
+args = [-1, 0.2]
+raises = "ValueError"
+message = "amount must be nonnegative"

@@ -10,6 +10,7 @@ from .pipeline import Pipeline
 from .rollout import prepare_rollout
 from .real_pipeline import RealPipeline
 from .publish import publish_run
+from .base_image import export_base
 
 
 def run_and_publish(args, config=None):
@@ -22,7 +23,7 @@ def run_and_publish(args, config=None):
         result = RealPipeline().run(repo_url=args.repo_url, output=staging, commit=args.commit,
                                     local_path=args.local_path, test_argv=shlex.split(args.test_command),
                                     max_candidates=args.max_candidates, base_image=args.base_image,
-                                    offline_build=args.offline_build)
+                                    offline_build=args.offline_build, compound=args.compound)
     else:
         result = Pipeline().run(config, staging)
     if result["status"] != "completed":
@@ -56,18 +57,25 @@ def main(argv=None):
     real.add_argument("--max-candidates", type=int, default=5)
     real.add_argument("--base-image", default="python:3.11-slim")
     real.add_argument("--offline-build", action="store_true")
+    real.add_argument("--compound", action="store_true", help="Compose two related API migrations")
     check = commands.add_parser("validate-config")
     check.add_argument("--config", required=True, type=Path)
     rollout = commands.add_parser("prepare-rollout", help="Export base repository and solver-visible task only")
     rollout.add_argument("--run", required=True, type=Path)
     rollout.add_argument("--instance", required=True)
     rollout.add_argument("--output", required=True, type=Path)
+    bundle = commands.add_parser("export-base", help="Save the shared Docker base image for offline transfer")
+    bundle.add_argument("--run", required=True, type=Path)
+    bundle.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         if args.command == "prepare-rollout":
             result = prepare_rollout(args.run, args.instance, args.output)
             print(dumps(result, indent=2))
+            return 0
+        if args.command == "export-base":
+            print(dumps(export_base(args.run, args.output), indent=2))
             return 0
         if args.command == "run-real":
             result = run_and_publish(args)

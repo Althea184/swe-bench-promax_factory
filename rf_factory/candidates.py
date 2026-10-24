@@ -6,7 +6,7 @@ def filter_and_rank(candidates, config):
     for candidate in sorted(candidates, key=lambda item: (item.path, item.start_line)):
         metrics = candidate.metrics
         reasons = []
-        if candidate.strategy != "api-migration-v2":
+        if candidate.strategy not in {"api-migration-v2", "module-responsibility-v1"}:
             reasons.append("unsupported strategy")
         if metrics.get("caller_modules", 0) < config.min_caller_modules:
             reasons.append("too few caller modules")

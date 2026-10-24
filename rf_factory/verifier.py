@@ -15,8 +15,7 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def verify(root: Path, spec: dict):
-    root = Path(root)
+def api_structure(root, spec):
     checks, details = {}, {}
     api_path = root / spec["api_module"]
     try:
@@ -56,6 +55,53 @@ def verify(root: Path, spec: dict):
             checks[f"caller:{path}"] = False
         checks["all_target_calls_migrated"] = False
         details["call_graph_error"] = str(exc)
+    return checks, details
+
+
+def responsibility_structure(root, spec):
+    checks, details = {}, {}
+    symbol = spec["symbol"]
+    target = root / spec["target_module"]
+    try:
+        tree = ast.parse(target.read_text(encoding="utf-8"))
+        checks["service_owns_function"] = sum(isinstance(n, ast.FunctionDef) and n.name == symbol for n in tree.body) == 1
+        checks["service_modified"] = sha(target) != spec["base_hashes"][spec["target_module"]]
+    except (OSError, SyntaxError, UnicodeError) as exc:
+        checks["service_owns_function"] = checks["service_modified"] = False
+        details["service_error"] = str(exc)
+    for path in spec["source_modules"]:
+        try:
+            tree = ast.parse((root / path).read_text(encoding="utf-8"))
+            imports = [n for n in tree.body if isinstance(n, ast.ImportFrom)
+                       and n.module == spec["target_import"]
+                       and any(a.name == symbol for a in n.names)]
+            if spec.get("class_name"):
+                classes = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == spec["class_name"]]
+                methods = [n for cls in classes for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == symbol]
+                calls = [n for method in methods for n in ast.walk(method) if isinstance(n, ast.Call)
+                         and isinstance(n.func, ast.Name)
+                         and any(n.func.id == a.asname or n.func.id == a.name for imp in imports for a in imp.names if a.name == symbol)]
+                migrated = len(methods) == 1 and len(methods[0].body) == 1 and len(calls) == 1
+            else:
+                local = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == symbol]
+                calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                         and any(n.func.id == a.asname or n.func.id == a.name for imp in imports for a in imp.names if a.name == symbol)]
+                migrated = not local and len(calls) >= spec["call_counts"][path]
+            checks[f"caller:{path}"] = (migrated and bool(imports)
+                                         and sha(root / path) != spec["base_hashes"][path])
+        except (OSError, SyntaxError, UnicodeError) as exc:
+            checks[f"caller:{path}"] = False
+            details[f"caller_error:{path}"] = str(exc)
+    return checks, details
+
+
+def verify(root: Path, spec: dict):
+    root = Path(root)
+    checks, details = {}, {}
+    if spec.get("strategy") == "module-responsibility-v1":
+        checks, details = responsibility_structure(root, spec)
+    else:
+        checks, details = api_structure(root, spec)
     env = {key: value for key, value in os.environ.items() if key not in {"PYTHONPATH", "PYTHONHOME"}}
     runner = Path(__file__).with_name("test_runner.py")
     report = root / ".rf_evaluator_tests.json"
@@ -100,6 +146,36 @@ print(json.dumps(results))
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         checks["functional_api"] = False
         details["functional_error"] = str(exc)
+    if spec.get("class_name"):
+        probe = '''import importlib, json, sys, tempfile
+from pathlib import Path
+results = []
+for name in json.loads(sys.argv[1]):
+    cls = getattr(importlib.import_module(name), sys.argv[2])
+    with tempfile.TemporaryDirectory() as folder:
+        obj = cls.__new__(cls)
+        obj.output, obj.events, obj.stage = Path(folder), [], ""
+        getattr(obj, sys.argv[3])("probe", value=3)
+        recorded = json.loads((obj.output / "stages.json").read_text(encoding="utf-8"))
+        results.append(obj.stage == "probe" and obj.events == [{"stage": "probe", "value": 3}] and recorded == obj.events)
+print(json.dumps(results))
+'''
+        try:
+            modules = [path.removesuffix(".py").replace("/", ".") for path in spec["source_modules"]]
+            process = subprocess.run([sys.executable, "-B", "-c", probe, json.dumps(modules),
+                                      spec["class_name"], spec["symbol"]], cwd=root, env=env,
+                                     capture_output=True, text=True, timeout=spec["timeout"])
+            observed = json.loads(process.stdout) if process.returncode == 0 else []
+            checks["pipeline_event_behavior"] = len(observed) == len(modules) and all(observed)
+            if not spec["functional_cases"]:
+                checks["functional_api"] = checks["pipeline_event_behavior"]
+            details["pipeline_event"] = {"returncode": process.returncode, "observed": observed,
+                                         "stderr": process.stderr}
+        except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+            checks["pipeline_event_behavior"] = False
+            if not spec["functional_cases"]:
+                checks["functional_api"] = False
+            details["pipeline_event_error"] = str(exc)
     return {"checks": checks, "details": details}
 
 

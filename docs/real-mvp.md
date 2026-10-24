@@ -16,7 +16,7 @@ MVP 1 的真实路线由 `run-real` 进入 `RealPipeline`。它从 GitHub URL �
 4. `scripts/official_eval_windows.py`：在 Windows 上调用未修改的官方评分模块，修正其 POSIX 单引号与临时文件换行问题。
 5. `tests/test_real_pipeline.py`：候选发现和 Test Patch 的 no-op/gold 控制测试。
 
-运行目录保留独立克隆 `acquired/`、无 Git 的 `source/`、`repository.json`、候选诊断、`Dockerfile`、`environment.json`、`baseline.json`、每个候选的 Gold/Test Patch 与正负报告、`swe-bench-promax.json`、`eval.json`、`instances.jsonl` 和 `summary.json`。`instances.jsonl` 仅包含现有 `prepare-rollout` 需要的求解者可见字段。
+生成阶段使用独立克隆 `acquired/` 和无 Git 的 `source/`；发布成功后清理这些临时副本。发布目录保留固定 commit、镜像 ID、`repository.json`、候选诊断、`Dockerfile`、`environment.json`、`baseline.json`、每个候选的 Gold/Test Patch 与正负报告、`swe-bench-promax.json`、`eval.json`、`instances.jsonl` 和 `summary.json`。离线评测需预先加载该固定镜像；`prepare-rollout` 从镜像导出求解者工作区。
 
 ## 可复制运行命令
 

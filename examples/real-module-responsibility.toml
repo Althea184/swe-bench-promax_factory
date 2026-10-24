@@ -1,0 +1,18 @@
+[repository]
+source = "../runs/peng-weihan__swe-series-factory-c_661d5b9-37f35876/source"
+
+[pipeline]
+refactoring_type = "module_responsibility_migration"
+discovery_strategy = "module_responsibility_migration"
+test_dir = "tests"
+test_pattern = "test_source.py"
+test_timeout = 60
+
+[[responsibility_migrations]]
+source_modules = ["deepswe_factory.pipeline", "programbench_factory.pipeline"]
+target_module = "swe_factory.reports"
+class_name = "Pipeline"
+symbol = "event"
+target_imports = ["from nl2repo_factory.common import write_json"]
+goal = "Centralize duplicate pipeline event recording in the shared reporting service while preserving both pipelines' stage tracking and event output."
+behavioral_invariants = ["Keep each pipeline's event sequence and stages.json content unchanged.", "Preserve the existing regression behavior and error handling."]

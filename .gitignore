@@ -223,3 +223,9 @@ __marimo__/
 runs/
 .rf-factory-work/
 run-archive/
+runs-responsibility/
+.pytest-temp/
+runs-compound-*/
+runs-single-compat-*/
+compound-rollout-*/
+compound-pytest-*/

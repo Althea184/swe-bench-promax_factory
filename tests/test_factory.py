@@ -186,7 +186,10 @@ def test_harder_batch_and_solver_export():
             cid = only_row["task_spec"]["candidate"]["candidate_id"]
             assert (path / only_row["gold_patch"]["artifact"]).is_file()
             assert {child.name for child in (path / "tasks").iterdir()} == {cid}
-            assert json.loads((path / "repository.json").read_text(encoding="utf-8"))["snapshot"] == str(path / "source")
+            assert json.loads((path / "repository.json").read_text(encoding="utf-8"))["snapshot"] == (
+                "../_bases/" + chosen["repository"]["content_sha256"] + "/source")
+            assert not (path / "source").exists()
+            assert not (path / "gold" / cid / "workspace").exists()
             assert str(path / "baseline" / "tests.json") in json.loads((path / "baseline" / "result.json").read_text(encoding="utf-8"))["argv"]
             assert len(json.loads((path / "instances.json").read_text(encoding="utf-8"))) == 1
             assert prepare_rollout(path, only_row["instance_id"], root / ("solver-" + cid))["instance_id"] == only_row["instance_id"]

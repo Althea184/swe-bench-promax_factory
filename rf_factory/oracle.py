@@ -56,6 +56,13 @@ class BaselineOracle:
 class OracleBuilder:
     """Build acceptance conditions from the task spec and base snapshot."""
     def build(self, repo, spec, config):
+        if spec.refactoring_type == "module_responsibility_migration":
+            checks = {"strategy": "module-responsibility-v1", **spec.entities,
+                      "call_counts": spec.metadata["call_counts"],
+                      "base_hashes": {path: repo.files[path] for path in spec.scope},
+                      "functional_cases": spec.metadata["functional_cases"],
+                      "module": spec.entities["target_import"], "new_api": spec.entities["symbol"]}
+            return Oracle("module-responsibility-v1", checks, config.test_dir, config.test_pattern, config.test_timeout)
         if spec.refactoring_type != "api_migration":
             raise ValueError(f"Unsupported oracle strategy: {spec.refactoring_type}")
         checks = {"api_module": spec.entities["api_module"],
