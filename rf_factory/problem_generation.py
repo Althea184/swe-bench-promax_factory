@@ -30,6 +30,15 @@ class ProblemGenerator:
             raise FactoryError("Problem statement quality check failed: " + ", ".join(quality["issues"]))
         return ProblemStatement(text, "medium", "compound-task-spec-template-v1", quality)
 
+    def generate_historical(self, spec):
+        """Use the mined PR intent, retaining its controller-side evidence separately."""
+        text = (spec.goal.rstrip(".") + ". " + " ".join(spec.behavioral_invariants) +
+                " " + " ".join(spec.compatibility_requirements)).strip()
+        quality = self.check(text, spec)
+        if not quality["passed"] or any(value in text for value in ("_TrimmedRelease", "singledispatch")):
+            raise FactoryError("Historical problem statement leaks implementation detail or is too vague")
+        return ProblemStatement(text, "medium", "historical-intent-template-v1", quality)
+
     @staticmethod
     def check(text, spec):
         issues = []

@@ -227,6 +227,7 @@ runs-responsibility/
 .pytest-temp/
 runs-compound-*/
 runs-agent-*/
+runs-history-*/
 runs-single-compat-*/
 compound-rollout-*/
 compound-pytest-*/

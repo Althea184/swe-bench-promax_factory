@@ -17,6 +17,7 @@ from .models import CompoundTaskSpec
 from .problem_generation import ProblemGenerator
 from .repository import RepositoryPreparer
 from .usage_analysis import UsageIndex, module_path
+from .candidate_pool import synthetic_candidate, difficulty_metadata
 
 
 def relation(repo, left, right):
@@ -107,7 +108,8 @@ def candidates_for(repo, recipes, test_argv=None, *, include_candidates=False):
     return (pairs, rejected, accepted) if include_candidates else (pairs, rejected)
 
 
-def discovery_preflight(repo, recipes, test_argv, discovery_diagnostics, discovery_rejections):
+def discovery_preflight(repo, recipes, test_argv, discovery_diagnostics, discovery_rejections,
+                        repository=None, base_commit=None):
     """Report source-backed candidates and relations without building Docker."""
     pairs, rejected, accepted = candidates_for(repo, recipes, test_argv, include_candidates=True)
     candidates = []
@@ -121,9 +123,12 @@ def discovery_preflight(repo, recipes, test_argv, discovery_diagnostics, discove
                            "module": recipe.module, "path": spec.candidate.path,
                            "symbol": recipe.symbol, "parameter": recipe.parameter,
                            "line": spec.candidate.start_line, "callers": callers})
+    unified = ([asdict(synthetic_candidate(spec, repository=repository,
+                     base_commit=base_commit, files=repo.files).candidate)
+                for _, spec in accepted] if repository and base_commit else [])
     return {"status": "eligible_pairs_found" if pairs else "no_eligible_pair",
             "candidate_count": len(candidates), "pair_count": len(pairs),
-            "candidates": candidates,
+            "candidates": candidates, "unified_candidates": unified,
             "pairs": [{"subtasks": [{"module": item.module, "symbol": item.symbol}
                                     for item in pair[:2]], "relation": pair[4]}
                       for pair in pairs],
@@ -252,6 +257,13 @@ def synthesize_compound(repo, recipes, output, clone, repo_url, base_commit,
                 "environment": {"python": ">=3.11", "dependencies": []}}, ensure_ascii=False) + "\n", encoding="utf-8")
             write_json(output / "composition.json", asdict(composition))
             write_json(output / "subtasks.json", [asdict(spec) for spec in specs])
+            unified_tasks = [synthetic_candidate(spec, repository=repo_url,
+                             base_commit=base_commit, files=repo.files) for spec in specs]
+            write_json(output / "unified_candidates.json",
+                       [asdict(task.candidate) for task in unified_tasks])
+            write_json(output / "difficulty.json", difficulty_metadata(
+                       unified_tasks, gold_patch, [path for step in steps for path in step["changed_files"]],
+                       pair[4]))
             write_json(output / "validation.json", {label: {"returncode": result.returncode,
                 "stdout": result.stdout, "stderr": result.stderr} for label, result in controls.items()})
             (output / "gold.patch").write_text(gold_patch, encoding="utf-8")

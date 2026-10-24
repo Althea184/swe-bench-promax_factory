@@ -195,7 +195,7 @@ class RealPipeline:
             if preflight:
                 from .compound import discovery_preflight
                 report = discovery_preflight(repo, recipes[:max_candidates], test_argv,
-                                             diagnostics, discovery_rejections)
+                                             diagnostics, discovery_rejections, repo_url, base_commit)
                 report.update(repo_url=repo_url, base_commit=base_commit,
                               discovered_recipe_count=len(recipes),
                               considered_recipe_count=min(len(recipes), max_candidates))
@@ -296,6 +296,13 @@ class RealPipeline:
                            "patch": gold_patch, "test_patch": test_patch,
                            "problem_statement": problem.text, "hints_text": ""}
                     write_json(output / "swe-bench-promax.json", [row])
+                    from .candidate_pool import synthetic_candidate, difficulty_metadata
+                    unified = synthetic_candidate(spec, repository=repo_url,
+                                                  base_commit=base_commit, files=repo.files)
+                    from dataclasses import asdict
+                    write_json(output / "unified_candidates.json", [asdict(unified.candidate)])
+                    write_json(output / "difficulty.json", difficulty_metadata(
+                               (unified,), gold_patch, [change.path for change in gold.changes]))
                     write_json(output / "eval.json", {instance_id: {"instance_id": instance_id,
                                "eval_script": script}})
                     solver_row = {"instance_id": instance_id,

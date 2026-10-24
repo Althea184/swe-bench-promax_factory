@@ -12,6 +12,7 @@ from .real_pipeline import RealPipeline
 from .publish import publish_run
 from .base_image import export_base
 from .agent_runner import run_agent
+from .history import HistoryPipeline
 
 
 def run_and_publish(args, config=None):
@@ -19,7 +20,18 @@ def run_and_publish(args, config=None):
     work_root = output_root.parent / ".rf-factory-work"
     work_root.mkdir(parents=True, exist_ok=True)
     staging = work_root / uuid4().hex
-    if args.command == "run-real":
+    if args.command == "run-history":
+        import shlex
+        if args.preflight:
+            return HistoryPipeline().run(output=output_root, pr_url=args.pr_url,
+                repo_url=args.repo_url, commit=args.commit, issue_url=args.issue_url,
+                local_path=args.local_path, preflight=True, base_image=args.base_image,
+                offline_build=args.offline_build, test_argv=shlex.split(args.test_command))
+        result = HistoryPipeline().run(output=staging, pr_url=args.pr_url,
+            repo_url=args.repo_url, commit=args.commit, issue_url=args.issue_url,
+            local_path=args.local_path, base_image=args.base_image,
+            offline_build=args.offline_build, test_argv=shlex.split(args.test_command))
+    elif args.command == "run-real":
         import shlex
         if args.preflight:
             return RealPipeline().run(repo_url=args.repo_url, output=output_root,
@@ -68,6 +80,18 @@ def main(argv=None):
     real.add_argument("--offline-build", action="store_true")
     real.add_argument("--compound", action="store_true", help="Compose two related API migrations")
     real.add_argument("--preflight", action="store_true", help="Report compound discovery before Docker build")
+    history = commands.add_parser("run-history", help="Mine a merged GitHub refactoring PR")
+    source = history.add_mutually_exclusive_group(required=True)
+    source.add_argument("--pr-url")
+    source.add_argument("--commit")
+    source.add_argument("--issue-url")
+    history.add_argument("--repo-url", help="Required with --commit")
+    history.add_argument("--local-path", type=Path, help="Clean clone of the same GitHub repository")
+    history.add_argument("--output", required=True, type=Path)
+    history.add_argument("--preflight", action="store_true")
+    history.add_argument("--test-command", default="python -m pytest -q tests")
+    history.add_argument("--base-image", default="python:3.11-slim")
+    history.add_argument("--offline-build", action="store_true")
     check = commands.add_parser("validate-config")
     check.add_argument("--config", required=True, type=Path)
     rollout = commands.add_parser("prepare-rollout", help="Export base repository and solver-visible task only")
@@ -109,6 +133,10 @@ def main(argv=None):
             result = run_and_publish(args)
             print(dumps(result, indent=2))
             return 1 if result.get("status") == "preflight_completed" and not result.get("pair_count") else 0
+        if args.command == "run-history":
+            result = run_and_publish(args)
+            print(dumps(result, indent=2))
+            return 0 if result.get("status") in {"completed", "preflight_completed"} else 1
         if args.command == "demo":
             config = Config(Path(__file__).with_name("fixtures") / "api_migration_repo")
         else:

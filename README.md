@@ -1,6 +1,6 @@
 # Refactoring Instance Factory
 
-This repository is a research baseline for synthesizing SWE-Bench ProMax style refactoring instances. API migration is the first narrow, deterministic strategy used to exercise the complete pipeline. It is not an official ProMax implementation.
+This repository is a research baseline for synthesizing SWE-Bench ProMax style refactoring instances. It supports a narrow synthetic API migration route and a conservative historical PR mining route. It is not an official ProMax implementation.
 
 ## Run
 
@@ -66,6 +66,24 @@ Each run retains stage evidence:
 The current verifier recognizes direct imports, module-qualified access, and static re-exports, and allows implementations whose bytes differ from gold. It is not a proof of full behavioral equivalence. See [docs/reference-analysis.md](docs/reference-analysis.md) for the architectural comparison, [docs/pilot.md](docs/pilot.md) for the smoke fixture, and [docs/harder-batch.md](docs/harder-batch.md) for the five-task batch and rollout instructions.
 
 `run-real` is the Docker-gated Python MVP for fixed GitHub revisions. It discovers a conservative API migration from source, emits a Gold Patch and Test Patch, requires container baseline/gold/no-op checks, and exports ProMax-compatible `swe-bench-promax.json` plus `eval.json`. See [docs/real-mvp.md](docs/real-mvp.md) for the verified run, output layout, commands, and limitations.
+
+## Historical PR mining (opt in)
+
+`run-history` obtains merged PR metadata and commit/file evidence from the GitHub API, resolves the actual base from the merged commit's Git ancestry, and checks the merged diff against the PR file list. It conservatively classifies structural changes and requires an evidence-backed acceptance strategy before Docker synthesis. PR, commit, and issue URL entry points are available; an issue without one traceable merged PR produces a preflight rejection without inventing a Gold Patch. Preflight does not build Docker. The current acceptance strategy covers `canonicalize_version` reusing `Version` string rendering; other historical refactorings are reported as unsupported until their goals have independent tests.
+
+Verified source: [pypa/packaging PR #793](https://github.com/pypa/packaging/pull/793), squash merge commit `680c31aa25d24f71f897717f84e3dac434a8c063`, base `c385b58c4d0e4d66f5c8273ebb155801c92aadf3`. The PR describes removing duplicate version-string rendering in `canonicalize_version`. Its real developer diff changes `src/packaging/utils.py` and `src/packaging/version.py`; the Gold Patch is that exact production diff. The acceptance patch checks that canonicalization uses the `Version` string renderer and retains version behavior, without comparing the solver patch to Gold. On Python 3.11 Docker, Baseline and Gold each passed 26,846 upstream tests (6 warnings); No-op failed two of three new acceptance checks; clean Gold application passed. The published instance is `runs-history-packaging-pr793-final-20261024/pypa__packaging-h_c385b58-pr793-c20a3bec/`.
+
+```powershell
+docker build -t rf-packaging-test-base:py311 -f docker/packaging.Dockerfile docker
+python -m rf_factory run-history --pr-url https://github.com/pypa/packaging/pull/793 --preflight --output runs-history-pr793-preflight-repro
+python -m rf_factory run-history --pr-url https://github.com/pypa/packaging/pull/793 --base-image rf-packaging-test-base:py311 --offline-build --test-command 'python -m pytest -q tests' --output runs-history-pr793-repro
+```
+
+Use a new `--output` on every rerun. A clean local GitHub clone can be supplied with `--local-path`; the verified run used `D:\class\remote\SJT_LLMSE\packaging`. Commit mode uses `--repo-url https://github.com/pypa/packaging --commit 680c31aa25d24f71f897717f84e3dac434a8c063`. The controller directory retains `source_pr.json`, `original-pr.patch`, `gold.patch`, `test.patch`, `problem_evidence.json`, `patch_provenance.json`, and complete Docker logs. `prepare-rollout` exports only the fixed base repository, task, and environment. Public GitHub history itself can reveal the developer solution to a solver that searches online; this provenance risk is recorded in `problem_evidence.json`.
+
+`RefactoringCandidate` and `RefactoringTaskSpec` provide a source-neutral private representation. Historical mining creates them directly; the synthetic route projects its existing TaskSpec through `candidate_pool.py` and keeps the old schema and verifier. `history_composition.py` can plan two consecutive, related historical revisions in an isolated clone and produce one Base-to-final diff. It does not publish a compound instance until independent subtask acceptance and Partial controls are available. Cross-source composition also requires one reproducible base and remains a planned extension. Difficulty metadata describes task size and structure; it is not a measured Agent difficulty score.
+
+After these changes, the existing `run-real --compound` route was also rerun against `peng-weihan/swe-series-factory` at `661d5b978a30e6d3517ad8232451353bb5e81ce1`. Discovery found 6 candidates and 5 eligible pairs. Its full Docker run passed Baseline and Gold, failed No-op and both incomplete Partial variants, and passed each Partial variant's own acceptance. The regression output is `runs-compound-swe-history-regression-full-20261024/peng-weihan__swe-series-factory-c_661d5b9-61ffa981/`.
 
 ## Compound API migration (opt in)
 

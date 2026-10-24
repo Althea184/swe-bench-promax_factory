@@ -33,6 +33,56 @@ class Candidate:
 
 
 @dataclass(frozen=True)
+class RefactoringCandidate:
+    """Source-neutral candidate; provenance stays private to the controller."""
+    candidate_id: str
+    repository: str
+    base_commit: str
+    source_type: str
+    source_refs: tuple[dict, ...]
+    refactoring_types: tuple[str, ...]
+    affected_symbols: tuple[str, ...]
+    affected_modules: tuple[str, ...]
+    goal: str
+    behavioral_invariants: tuple[str, ...]
+    compatibility_requirements: tuple[str, ...]
+    gold_source: str
+    dependencies: tuple[str, ...] = ()
+    evidence: dict = field(default_factory=dict)
+    metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.source_type not in {"historical", "synthetic"}:
+            raise ValueError("Invalid candidate source")
+        if self.gold_source not in {"developer_patch", "generated_patch"}:
+            raise ValueError("Invalid gold provenance")
+        if len(self.base_commit) != 40 or not all(c in "0123456789abcdef" for c in self.base_commit.lower()):
+            raise ValueError("Candidate base commit must be a full SHA")
+        if not all((self.candidate_id, self.repository, self.refactoring_types, self.goal)):
+            raise ValueError("Incomplete refactoring candidate")
+        if self.source_type == "historical" and not self.source_refs:
+            raise ValueError("Historical candidate needs source references")
+
+
+@dataclass(frozen=True)
+class RefactoringTaskSpec:
+    candidate: RefactoringCandidate
+    goal: str
+    scope: tuple[str, ...]
+    structural_requirements: tuple[str, ...]
+    behavioral_invariants: tuple[str, ...]
+    compatibility_requirements: tuple[str, ...]
+    acceptance_strategy: str
+    metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.goal.strip() or not self.scope or not self.acceptance_strategy:
+            raise ValueError("Incomplete refactoring task")
+        for path in self.scope:
+            relative(path)
+
+
+@dataclass(frozen=True)
 class TaskSpec:
     """Internal task contract; strategy details stay in metadata."""
     candidate: Candidate
