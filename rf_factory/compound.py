@@ -16,23 +16,37 @@ from .config import Config
 from .models import CompoundTaskSpec
 from .problem_generation import ProblemGenerator
 from .repository import RepositoryPreparer
-from .usage_analysis import UsageIndex
+from .usage_analysis import UsageIndex, module_path
 
 
 def relation(repo, left, right):
     """Require a direct call or a shared production workflow in one API module."""
-    if left.module != right.module:
-        return None, "different API modules without an explicit call relationship"
-    tree = ast.parse((repo.snapshot / (left.module.replace(".", "/") + ".py")).read_text(encoding="utf-8"))
-    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    if left.symbol == right.symbol:
+        return None, "identical symbol names across candidates are ambiguous for compound ordering"
     edges = []
+    paths = {recipe.module: module_path(recipe.module, repo.files) for recipe in (left, right)}
+    indexes = {(recipe.module, recipe.symbol): UsageIndex(repo.snapshot, repo.files, recipe.module, recipe.symbol)
+               for recipe in (left, right)}
     for caller, callee in ((left, right), (right, left)):
-        if any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-               and node.func.id == callee.symbol for node in ast.walk(functions[caller.symbol])):
+        caller_tree = indexes[(callee.module, callee.symbol)].trees[caller.module]
+        functions = [node for node in caller_tree.body
+                     if isinstance(node, ast.FunctionDef) and node.name == caller.symbol]
+        if len(functions) != 1:
+            raise ValueError(f"Missing or ambiguous caller {caller.module}.{caller.symbol}")
+        fn = functions[0]
+        if caller.module == callee.module:
+            direct = any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                         and node.func.id == callee.symbol for node in ast.walk(fn))
+        else:
+            direct = any(fn.lineno <= node.lineno <= fn.end_lineno for node in
+                         indexes[(callee.module, callee.symbol)].call_sites().get(paths[caller.module], []))
+        if direct:
             edges.append((callee.symbol, caller.symbol))
-    first = set(UsageIndex(repo.snapshot, repo.files, left.module, left.symbol).call_sites())
-    second = set(UsageIndex(repo.snapshot, repo.files, right.module, right.symbol).call_sites())
+    first = set(indexes[(left.module, left.symbol)].call_sites())
+    second = set(indexes[(right.module, right.symbol)].call_sites())
     shared = sorted(first & second)
+    if left.module != right.module and not edges:
+        return None, "different API modules without an explicit call relationship"
     if not edges and not shared:
         return None, "no direct call or shared production caller"
     if not edges and left.module.split(".")[-1] in {"common", "utils", "cli"}:
@@ -41,10 +55,10 @@ def relation(repo, left, right):
         return None, "cyclic API dependency"
     return {"kind": "direct_call" if edges else "shared_workflow",
             "direct_edges": edges, "shared_callers": shared,
-            "api_module": left.module}, None
+            "api_modules": sorted({left.module, right.module})}, None
 
 
-def candidates_for(repo, recipes, test_argv=None):
+def candidates_for(repo, recipes, test_argv=None, *, include_candidates=False):
     accepted, rejected = [], []
     pattern = "test*.py"
     if test_argv and "-p" in test_argv:
@@ -90,7 +104,31 @@ def candidates_for(repo, recipes, test_argv=None):
     pairs.sort(key=lambda pair: (pair[4]["kind"] != "direct_call",
                                  -len(pair[4]["shared_callers"]), pair[0].module,
                                  pair[0].symbol, pair[1].symbol))
-    return pairs, rejected
+    return (pairs, rejected, accepted) if include_candidates else (pairs, rejected)
+
+
+def discovery_preflight(repo, recipes, test_argv, discovery_diagnostics, discovery_rejections):
+    """Report source-backed candidates and relations without building Docker."""
+    pairs, rejected, accepted = candidates_for(repo, recipes, test_argv, include_candidates=True)
+    candidates = []
+    for recipe, spec in accepted:
+        index = UsageIndex(repo.snapshot, repo.files, recipe.module, recipe.symbol)
+        callers = [{"path": path, "module": index.module_for_path(path),
+                    "calls": [{"line": node.lineno, "column": node.col_offset,
+                               "end_line": node.end_lineno} for node in nodes]}
+                   for path, nodes in sorted(index.call_sites().items())]
+        candidates.append({"candidate_id": spec.candidate.candidate_id,
+                           "module": recipe.module, "path": spec.candidate.path,
+                           "symbol": recipe.symbol, "parameter": recipe.parameter,
+                           "line": spec.candidate.start_line, "callers": callers})
+    return {"status": "eligible_pairs_found" if pairs else "no_eligible_pair",
+            "candidate_count": len(candidates), "pair_count": len(pairs),
+            "candidates": candidates,
+            "pairs": [{"subtasks": [{"module": item.module, "symbol": item.symbol}
+                                    for item in pair[:2]], "relation": pair[4]}
+                      for pair in pairs],
+            "rejections": [*discovery_rejections, *rejected],
+            "diagnostics": discovery_diagnostics}
 
 
 def ordered_pair(pair):
@@ -160,9 +198,9 @@ def synthesize_compound(repo, recipes, output, clone, repo_url, base_commit,
             composition = CompoundTaskSpec(specs, edge_ids, goal,
                                            tuple(sorted(set().union(*(set(spec.scope) for spec in specs)))),
                                            {"relation": pair[4], "ordered_symbols": [r.symbol for r, _ in ordered]})
-            test_patch = "".join(test_patch_for(spec, f"tests/test_rf_migration_{i}.py")
+            test_patch = "".join(test_patch_for(spec, f"rf_acceptance/test_rf_migration_{i}.py")
                                  for i, spec in enumerate(specs))
-            script = eval_script(test_patch, test_argv, "test_rf_migration_*.py")
+            script = eval_script(test_patch, test_argv, "test_rf_migration_*.py", "rf_acceptance")
             (attempt / "gold.patch").write_text(gold_patch, encoding="utf-8")
             (attempt / "test.patch").write_text(test_patch, encoding="utf-8")
             (attempt / "eval.sh").write_text(script, encoding="utf-8")
@@ -182,7 +220,8 @@ def synthesize_compound(repo, recipes, output, clone, repo_url, base_commit,
                 (attempt / f"partial-only-{i}.patch").write_text(partial, encoding="utf-8")
                 encoded_partial = base64.b64encode(partial.encode()).decode()
                 controls[f"partial_{i}"] = run_script(with_patch(encoded_partial, script))
-                own_script = eval_script(test_patch, test_argv, f"test_rf_migration_{i}.py")
+                own_script = eval_script(test_patch, test_argv, f"test_rf_migration_{i}.py",
+                                         "rf_acceptance")
                 controls[f"partial_{i}_own"] = run_script(with_patch(encoded_partial, own_script))
             for label, result in controls.items():
                 write_json(attempt / f"{label}.json", {"returncode": result.returncode,

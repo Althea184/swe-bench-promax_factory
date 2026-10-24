@@ -8,13 +8,12 @@ from pathlib import Path
 from .common import FactoryError, digest, relative
 from .models import Candidate, FileChange, GoldPatch, TaskSpec
 from .repository import IGNORED
-from .usage_analysis import UsageIndex
+from .usage_analysis import UsageIndex, module_name, module_path
 
 
-def recipe_for(config, candidate):
+def recipe_for(config, candidate, files):
     return next((item for item in config.api_migrations
-                 if (item.module.replace(".", "/") + ".py" == candidate.path
-                     or item.module.replace(".", "/") + "/__init__.py" == candidate.path)
+                 if module_name(candidate.path, files) == item.module
                  and item.symbol == candidate.symbol), None)
 
 
@@ -23,11 +22,10 @@ class ApiMigrationDiscovery:
     def discover(self, repo, config):
         candidates, diagnostics = [], []
         for recipe in config.api_migrations:
-            path = recipe.module.replace(".", "/") + ".py"
-            if path not in repo.files and recipe.module.replace(".", "/") + "/__init__.py" in repo.files:
-                path = recipe.module.replace(".", "/") + "/__init__.py"
-            if path not in repo.files:
-                diagnostics.append({"path": path, "error": "configured API module missing"})
+            try:
+                path = module_path(recipe.module, repo.files)
+            except ValueError as exc:
+                diagnostics.append({"module": recipe.module, "error": str(exc)})
                 continue
             try:
                 tree = ast.parse((repo.snapshot / path).read_text(encoding="utf-8"))
@@ -43,9 +41,9 @@ class ApiMigrationDiscovery:
                 calls = index.call_sites()
                 if recipe.symbol != recipe.target_symbol and any(
                         name != recipe.module and index.exports(name, recipe.symbol)
-                        and any(isinstance(node, ast.ImportFrom) and node.module == name
+                        and any(isinstance(node, ast.ImportFrom) and index.import_module(tree_module, node) == name
                                 and any(alias.name == recipe.symbol for alias in node.names)
-                                for tree in index.trees.values() for node in tree.body)
+                                for tree_module, tree in index.trees.items() for node in tree.body)
                         for name in index.trees):
                     raise ValueError("renamed API through re-export is unsupported")
                 if any(len(call.args) != 2 or call.keywords for nodes in calls.values() for call in nodes):
@@ -65,7 +63,7 @@ class ApiMigrationDiscovery:
 
 class ApiMigrationSpecBuilder:
     def build(self, repo, candidate, config):
-        recipe = recipe_for(config, candidate)
+        recipe = recipe_for(config, candidate, repo.files)
         if candidate.strategy != "api-migration-v2" or repo.files.get(candidate.path) != candidate.source_sha256 or recipe is None:
             raise FactoryError("Stale or unsupported migration candidate")
         index = UsageIndex(repo.snapshot, repo.files, recipe.module, recipe.symbol)
@@ -102,8 +100,9 @@ class ApiMigrationGoldGenerator:
         if old != new:
             for candidate_path in repo.files:
                 if candidate_path.endswith(".py") and candidate_path not in paths:
-                    tree = index.trees.get(candidate_path.removesuffix(".py").replace("/", "."))
-                    if tree and any(isinstance(node, ast.ImportFrom) and node.module == module
+                    candidate_module = module_name(candidate_path, repo.files)
+                    tree = index.trees.get(candidate_module)
+                    if tree and any(isinstance(node, ast.ImportFrom) and index.import_module(candidate_module, node) == module
                                     and any(alias.name == old for alias in node.names) for node in tree.body):
                         paths.append(candidate_path)
         for path in paths:
@@ -157,7 +156,7 @@ class ApiMigrationGoldGenerator:
                             replace(call.func, ast.get_source_segment(source, call.func).rsplit(".", 1)[0] + "." + new)
                 if old != new:
                     for node in ast.walk(tree):
-                        if isinstance(node, ast.ImportFrom) and node.module == module:
+                        if isinstance(node, ast.ImportFrom) and index.import_module(module_name(path, repo.files), node) == module:
                             for alias in node.names:
                                 if alias.name == old and alias.asname is None:
                                     replace(alias, new)

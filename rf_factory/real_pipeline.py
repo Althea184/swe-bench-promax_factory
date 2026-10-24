@@ -7,6 +7,7 @@ import datetime as dt
 import json
 import re
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -34,9 +35,9 @@ def require(result, operation):
     return result.stdout.strip()
 
 
-def discover_recipes(repo):
+def discover_recipes(repo, *, include_rejections=False):
     """Infer simple keyword-only migrations from definitions and their static calls."""
-    recipes, diagnostics = [], []
+    recipes, diagnostics, rejections = [], [], []
     files = [path for path in repo.files if path.endswith(".py") and not
              any(part in {"tests", "test", "fixtures"} for part in Path(path).parts)]
     for path in sorted(files):
@@ -45,22 +46,37 @@ def discover_recipes(repo):
         except (OSError, UnicodeError, SyntaxError) as exc:
             diagnostics.append({"path": path, "error": str(exc)})
             continue
-        module = module_name(path)
+        module = module_name(path, repo.files)
         for fn in tree.body:
-            if not isinstance(fn, ast.FunctionDef) or fn.name.startswith("_"):
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            identity = {"path": path, "module": module, "symbol": fn.name, "line": fn.lineno}
+            if fn.name.startswith("_"):
+                if include_rejections:
+                    rejections.append({**identity, "reason": "private top-level function"})
                 continue
             args = fn.args
             if (fn.decorator_list or args.posonlyargs or len(args.args) != 2 or
                     len(args.defaults) > 1 or args.kwonlyargs or args.vararg or args.kwarg):
+                if include_rejections:
+                    rejections.append({**identity, "reason": "unsupported signature or decorators"})
                 continue
             try:
                 index = UsageIndex(repo.snapshot, files, module, fn.name)
                 sites = index.call_sites()
-                if not sites or any(len(call.args) != 2 or call.keywords
-                                    for calls in sites.values() for call in calls):
+                if not sites:
+                    if include_rejections:
+                        rejections.append({**identity, "reason": "no statically resolved production callers"})
+                    continue
+                if any(len(call.args) != 2 or call.keywords
+                       for calls in sites.values() for call in calls):
+                    if include_rejections:
+                        rejections.append({**identity, "reason": "unsupported production call shape"})
                     continue
             except (OSError, UnicodeError, SyntaxError, ValueError) as exc:
                 diagnostics.append({"path": path, "symbol": fn.name, "error": str(exc)})
+                if include_rejections:
+                    rejections.append({**identity, "reason": f"call graph analysis failed: {exc}"})
                 continue
             parameter = args.args[1].arg
             recipes.append((len(sites), sum(map(len, sites.values())),
@@ -71,7 +87,8 @@ def discover_recipes(repo):
                                 ("All production callers must use the named argument.",),
                                 (), auto_discovered=True)))
     recipes.sort(key=lambda item: (-item[0], -item[1], item[2].module, item[2].symbol))
-    return [item[2] for item in recipes], diagnostics
+    result = ([item[2] for item in recipes], diagnostics)
+    return (*result, rejections) if include_rejections else result
 
 
 def test_patch_for(spec, path="tests/test_rf_migration.py"):
@@ -115,13 +132,14 @@ class TestRefactoringContract(unittest.TestCase):
     return patch
 
 
-def eval_script(test_patch, test_argv, test_pattern="test_rf_migration.py"):
+def eval_script(test_patch, test_argv, test_pattern="test_rf_migration.py",
+                test_dir="tests"):
     encoded = base64.b64encode(test_patch.encode()).decode()
     return ("#!/bin/bash\nset -uo pipefail\ncd /testbed\n"
             "export PIP_NO_INDEX=1 UV_OFFLINE=1 PYTHONPATH=/testbed\n"
             f"echo '{encoded}' | base64 -d > /tmp/rf-test.patch\n"
             "if ! git apply /tmp/rf-test.patch; then echo OMNIGRIL_TEST_PATCH_APPLY_FAILED=1; exit 1; fi\n"
-            f"{shlex.join(test_argv)} && python -m unittest discover -s tests -p {shlex.quote(test_pattern)}\n"
+            f"{shlex.join(test_argv)} && python -m unittest discover -s {shlex.quote(test_dir)} -p {shlex.quote(test_pattern)}\n"
             "rc=$?\necho OMNIGRIL_EXIT_CODE=$rc\nexit $rc\n")
 
 
@@ -129,7 +147,10 @@ class RealPipeline:
     def run(self, *, repo_url: str, output: Path, commit: str | None = None,
             local_path: Path | None = None, test_argv: list[str] | None = None,
             max_candidates: int = 5, base_image: str = "python:3.11-slim",
-            offline_build: bool = False, compound: bool = False):
+            offline_build: bool = False, compound: bool = False,
+            preflight: bool = False):
+        if preflight and not compound:
+            raise FactoryError("Discovery preflight currently requires --compound")
         if not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?", repo_url):
             raise FactoryError("repo_url must identify a public GitHub repository")
         if commit is not None and not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
@@ -164,10 +185,31 @@ class RealPipeline:
             write_json(output / "repository.json", {"repo": repo_url, "base_commit": base_commit,
                          "snapshot_sha256": repo.content_sha256, "files": len(repo.files)})
             stage = "discovery"
-            recipes, diagnostics = discover_recipes(repo)
+            if preflight:
+                recipes, diagnostics, discovery_rejections = discover_recipes(repo, include_rejections=True)
+            else:
+                recipes, diagnostics = discover_recipes(repo)
             write_json(output / "discovery_diagnostics.json", diagnostics)
             write_json(output / "discovered_recipes.json", [dict(module=r.module, symbol=r.symbol,
                        parameter=r.parameter) for r in recipes])
+            if preflight:
+                from .compound import discovery_preflight
+                report = discovery_preflight(repo, recipes[:max_candidates], test_argv,
+                                             diagnostics, discovery_rejections)
+                report.update(repo_url=repo_url, base_commit=base_commit,
+                              discovered_recipe_count=len(recipes),
+                              considered_recipe_count=min(len(recipes), max_candidates))
+                write_json(output / "preflight.json", report)
+                summary = {"status": "preflight_completed", "base_commit": base_commit,
+                           "candidate_count": report["candidate_count"],
+                           "pair_count": report["pair_count"],
+                           "preflight": str(output / "preflight.json")}
+                write_json(output / "summary.json", summary)
+                for temporary in (clone, output / "source"):
+                    if not temporary.resolve().is_relative_to(output):
+                        raise FactoryError("Unsafe preflight cleanup path")
+                    shutil.rmtree(temporary)
+                return summary
             if not recipes:
                 raise FactoryError("No supported API migration candidate found")
             stage = "environment"

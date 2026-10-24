@@ -11,6 +11,7 @@ from .rollout import prepare_rollout
 from .real_pipeline import RealPipeline
 from .publish import publish_run
 from .base_image import export_base
+from .agent_runner import run_agent
 
 
 def run_and_publish(args, config=None):
@@ -20,6 +21,14 @@ def run_and_publish(args, config=None):
     staging = work_root / uuid4().hex
     if args.command == "run-real":
         import shlex
+        if args.preflight:
+            return RealPipeline().run(repo_url=args.repo_url, output=output_root,
+                                      commit=args.commit, local_path=args.local_path,
+                                      test_argv=shlex.split(args.test_command),
+                                      max_candidates=args.max_candidates,
+                                      base_image=args.base_image,
+                                      offline_build=args.offline_build,
+                                      compound=args.compound, preflight=True)
         result = RealPipeline().run(repo_url=args.repo_url, output=staging, commit=args.commit,
                                     local_path=args.local_path, test_argv=shlex.split(args.test_command),
                                     max_candidates=args.max_candidates, base_image=args.base_image,
@@ -58,6 +67,7 @@ def main(argv=None):
     real.add_argument("--base-image", default="python:3.11-slim")
     real.add_argument("--offline-build", action="store_true")
     real.add_argument("--compound", action="store_true", help="Compose two related API migrations")
+    real.add_argument("--preflight", action="store_true", help="Report compound discovery before Docker build")
     check = commands.add_parser("validate-config")
     check.add_argument("--config", required=True, type=Path)
     rollout = commands.add_parser("prepare-rollout", help="Export base repository and solver-visible task only")
@@ -67,6 +77,17 @@ def main(argv=None):
     bundle = commands.add_parser("export-base", help="Save the shared Docker base image for offline transfer")
     bundle.add_argument("--run", required=True, type=Path)
     bundle.add_argument("--output", required=True, type=Path)
+    agent = commands.add_parser("run-agent", help="Run an external solver and Docker-evaluate its patch")
+    agent.add_argument("--run", required=True, type=Path, help="Published real instance directory")
+    agent.add_argument("--instance", required=True)
+    agent.add_argument("--output", required=True, type=Path)
+    agent.add_argument("--agent-command", required=True,
+                       help="Trusted command; {task}, {repo}, {max_turns}, {model} placeholders are available")
+    agent.add_argument("--model", default="external-agent")
+    agent.add_argument("--repetitions", type=int, default=1)
+    agent.add_argument("--max-turns", type=int, default=20)
+    agent.add_argument("--agent-timeout", type=int, default=1800)
+    agent.add_argument("--eval-timeout", type=int, default=1800)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
@@ -77,10 +98,17 @@ def main(argv=None):
         if args.command == "export-base":
             print(dumps(export_base(args.run, args.output), indent=2))
             return 0
+        if args.command == "run-agent":
+            result = run_agent(run=args.run, instance_id=args.instance, output=args.output,
+                               agent_command=args.agent_command, model=args.model,
+                               repetitions=args.repetitions, max_turns=args.max_turns,
+                               agent_timeout=args.agent_timeout, eval_timeout=args.eval_timeout)
+            print(dumps(result, indent=2))
+            return 0
         if args.command == "run-real":
             result = run_and_publish(args)
             print(dumps(result, indent=2))
-            return 0
+            return 1 if result.get("status") == "preflight_completed" and not result.get("pair_count") else 0
         if args.command == "demo":
             config = Config(Path(__file__).with_name("fixtures") / "api_migration_repo")
         else:

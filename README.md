@@ -79,4 +79,34 @@ python -m rf_factory run-real --compound --repo-url https://github.com/peng-weih
 
 The published instance contains `swe-bench-promax.json`, `eval.json`, `gold.patch`, `test.patch`, `baseline.json`, `validation.json`, `composition.json`, `subtasks.json`, `relations.json`, `rejections.json`, and per-attempt control logs. Only the problem statement and base repository belong in a solver rollout; Gold, acceptance tests, composition details, and logs stay controller-side. This MVP supports two static Python API migrations only. Dynamic calls, arbitrary signatures, and other refactoring types remain unsupported. A selected regression suite that directly calls an API with its original positional signature disqualifies that candidate; the original tests are never rewritten.
 
+## Agent Runner
+
+`run-agent` runs a trusted external solver against one published Docker-backed real instance. It calls `prepare-rollout` for each repetition, runs the solver from the clean repository, collects a Git diff against the fixed base commit, rejects edits to test files, and applies the proposed patch in a fresh offline Docker container before running the instance's `eval.json` script. Compound runs also report each subtask's acceptance result after the full evaluation. It saves the solver's stdout/stderr, patch, prediction JSON, evaluation logs, per-attempt result, and a success-rate summary. Rollout workspaces are removed after each attempt. The controller-side Gold Patch, hidden acceptance tests, and composition metadata are not copied into the solver workspace.
+
+```powershell
+python -m rf_factory run-agent --run runs-compound-packaging-c1d2a9d-20261024/pypa__packaging-c_c1d2a9d-d7493939 --instance pypa__packaging-c_c1d2a9d-d7493939 --agent-command 'python path/to/my_agent.py' --model my-agent --max-turns 20 --repetitions 3 --agent-timeout 1800 --eval-timeout 1800 --output runs-agent-packaging-001
+```
+
+The command runs with its working directory set to the solver repository. The task text is provided on stdin and through `RF_TASK_FILE`; `RF_REPOSITORY`, `RF_RESULT_FILE`, `RF_MAX_TURNS`, and `RF_MODEL` are also set. The command string may use whole-token `{task}`, `{repo}`, `{max_turns}`, and `{model}` placeholders. An adapter may write `RF_RESULT_FILE` as JSON with nonnegative `turns`, `input_tokens`, `output_tokens`, and `cost_usd`. These usage values are reported by the adapter, not measured by the Factory. The Runner enforces wall-clock timeouts and rejects a reported turn count above `--max-turns`; enforcing the turn limit during generation is the adapter's responsibility. External commands run on the host and must be trusted; the rollout directory is a data boundary, not an operating-system security sandbox. Only ProMax real instances with an available pinned Docker image and `eval.json` are supported in this MVP.
+
+For a `src/` layout such as `src/packaging/utils.py`, discovery uses the Python module name `packaging.utils` while patches retain the repository path. Relative imports such as `from .utils import name` are resolved against the importing package. Run the read-only discovery preflight before building an image; it reports every considered candidate, production call site, related pair, and rejection reason in `preflight.json`:
+
+```powershell
+python -m rf_factory run-real --compound --preflight --repo-url https://github.com/pypa/packaging --local-path D:\class\remote\SJT_LLMSE\packaging --commit c1d2a9d8f5ca7cc11b7d2e902ed5ee3e255e8560 --output runs-compound-packaging-preflight --max-candidates 100 --test-command 'python -m pytest -q tests'
+```
+
+`--local-path` may be omitted to clone from GitHub. Preflight uses a temporary checkout and does not build Docker or modify the source checkout. A nonzero exit means no eligible pair or a discovery error; inspect `preflight.json` and `summary.json` in the output directory. When a pair is eligible, run the full Docker pipeline with the same commit, candidate limit, and regression command. To use an offline image build, first provide a base image with Git, `flit_core`, `pytest`, `hypothesis`, `pretend`, `coverage`, and `tomli_w`; then pass its tag with `--base-image` and `--offline-build`. Full synthesis still requires Baseline, Gold, No-op, clean Gold application, and both Partial controls.
+Each run requires a new `--output` directory; change the example directory names when repeating the experiment.
+
+For the pinned packaging revision, a reproducible local base image and full run are:
+
+```powershell
+docker build -t rf-packaging-test-base:py311 -f docker/packaging.Dockerfile docker
+python -m rf_factory run-real --compound --repo-url https://github.com/pypa/packaging --local-path D:\class\remote\SJT_LLMSE\packaging --commit c1d2a9d8f5ca7cc11b7d2e902ed5ee3e255e8560 --output runs-compound-packaging-c1d2a9d-20261024 --max-candidates 100 --base-image rf-packaging-test-base:py311 --offline-build --test-command 'python -m pytest -q tests'
+```
+
+Compound acceptance files live in `rf_acceptance/` inside the test patch. The original `tests/` regression suite runs in full, and each Partial control can run exactly one acceptance file to show that its own subtask is complete while the compound acceptance remains incomplete.
+
+Verified on the pinned packaging commit: preflight found four eligible API candidates and four related pairs. The selected pair is `packaging._ranges.range_is_empty` and `packaging._ranges.intersect_ranges`: the latter calls the former, and both serve range operations used by `packaging.ranges`. The exported instance is `runs-compound-packaging-c1d2a9d-20261024/pypa__packaging-c_c1d2a9d-d7493939/`. Docker Baseline and Gold each passed 63,335 upstream tests (3 skipped, 434 deselected by upstream configuration); No-op failed all four generated acceptance checks; each one-subtask Partial passed its own two checks and failed the other subtask's two checks. The final Gold Patch applied cleanly to the base image. See `baseline.json`, `validation.json`, and `attempts/0/` for full logs. The generated tests check the named-argument contract and tracked static callers; dynamic invocation patterns remain outside this MVP.
+
 The real module-responsibility example uses the previously frozen `peng-weihan/swe-series-factory` source at commit `661d5b978a30e6d3517ad8232451353bb5e81ce1`. It consolidates identical `Pipeline.event` methods in two factory modules into `swe_factory.reports`. The selected original regression file has five passing tests on Windows; the generated verifier additionally calls both event methods and checks stage tracking and `stages.json`. The local pipeline exports `rf.instance.v3`, not the ProMax-compatible `run-real` schema. This example needs the frozen source directory named in its config, and on Windows may require access to the system temporary directory for upstream tests.
