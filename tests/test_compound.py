@@ -2,9 +2,10 @@
 import subprocess
 from pathlib import Path
 
-from rf_factory.api_migration import ApiMigrationGoldGenerator, render_patch
-from rf_factory.compound import apply_steps, candidates_for
-from rf_factory.real_pipeline import discover_recipes, test_patch_for as make_test_patch
+from rf_factory.synthesis.generators.api_migration import ApiMigrationGoldGenerator, render_patch
+from rf_factory.synthesis.composition.synthetic import apply_steps, candidates_for
+from rf_factory.discovery.synthetic.recipes import discover_recipes
+from rf_factory.validation.synthetic_acceptance import test_patch_for as make_test_patch
 from rf_factory.repository import RepositoryPreparer
 
 

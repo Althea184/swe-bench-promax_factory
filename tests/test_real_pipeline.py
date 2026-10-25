@@ -4,11 +4,13 @@ import json
 import subprocess
 from pathlib import Path
 
-from rf_factory.api_migration import ApiMigrationDiscovery, ApiMigrationGoldGenerator, ApiMigrationSpecBuilder, render_patch
-from rf_factory.config import Config
-from rf_factory.real_pipeline import discover_recipes, eval_script, test_patch_for as make_test_patch
+from rf_factory.discovery.synthetic.api_migration import ApiMigrationDiscovery
+from rf_factory.synthesis.generators.api_migration import ApiMigrationGoldGenerator, ApiMigrationSpecBuilder, render_patch
+from rf_factory.core.config import Config
+from rf_factory.discovery.synthetic.recipes import discover_recipes
+from rf_factory.validation.synthetic_acceptance import eval_script, test_patch_for as make_test_patch
 from rf_factory.repository import RepositoryPreparer
-from rf_factory.publish import publish_run
+from rf_factory.instances.publish import publish_run
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "rf_factory/fixtures/api_migration_repo"

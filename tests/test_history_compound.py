@@ -5,10 +5,11 @@ import unittest
 
 import pytest
 
-from rf_factory.history_compound import HistoryCompoundPipeline, historical_relation
-from rf_factory.history_acceptance import StaticStructuralOperations
-from rf_factory.models import RefactoringCandidate, RefactoringTaskSpec
-from rf_factory.common import FactoryError
+from rf_factory.pipelines.historical_compound import HistoryCompoundPipeline
+from rf_factory.synthesis.composition.historical import historical_relation
+from rf_factory.validation.historical_acceptance import StaticStructuralOperations
+from rf_factory.core.models import RefactoringCandidate, RefactoringTaskSpec
+from rf_factory.core.common import FactoryError
 
 
 def git(root, *args):

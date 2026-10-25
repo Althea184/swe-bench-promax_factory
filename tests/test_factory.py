@@ -7,19 +7,20 @@ from uuid import uuid4
 
 import pytest
 
-from rf_factory.api_migration import ApiMigrationDiscovery, ApiMigrationSpecBuilder, ApiMigrationGoldGenerator, PatchApplier, render_patch
-from rf_factory.common import FactoryError
-from rf_factory.config import Config
-from rf_factory.evaluator import Evaluator
-from rf_factory.oracle import OracleBuilder
-from rf_factory.pipeline import Pipeline
-from rf_factory.problem_generation import ProblemGenerator
+from rf_factory.discovery.synthetic.api_migration import ApiMigrationDiscovery
+from rf_factory.synthesis.generators.api_migration import ApiMigrationSpecBuilder, ApiMigrationGoldGenerator, PatchApplier, render_patch
+from rf_factory.core.common import FactoryError
+from rf_factory.core.config import Config
+from rf_factory.validation.evaluator import Evaluator
+from rf_factory.validation.oracle import OracleBuilder
+from rf_factory.pipelines.local import Pipeline
+from rf_factory.issue_gen.generator import ProblemGenerator
 from rf_factory.repository import RepositoryPreparer, manifest
-from rf_factory.verifier import verify
-from rf_factory.rollout import prepare_rollout
-from rf_factory.publish import publish_run
-from rf_factory.candidates import filter_and_rank
-from rf_factory.models import Candidate
+from rf_factory.validation.verifier import verify
+from rf_factory.agents.rollout import prepare_rollout
+from rf_factory.instances.publish import publish_run
+from rf_factory.discovery.synthetic.ranking import filter_and_rank
+from rf_factory.core.models import Candidate
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "rf_factory/fixtures/api_migration_repo"

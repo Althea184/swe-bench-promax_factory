@@ -1,12 +1,13 @@
 """Real-pipeline discovery contracts for src layouts and relative imports."""
 import pytest
 
-from rf_factory.api_migration import ApiMigrationGoldGenerator
-from rf_factory.compound import candidates_for
-from rf_factory.compound import discovery_preflight
-from rf_factory.real_pipeline import discover_recipes, eval_script
+from rf_factory.synthesis.generators.api_migration import ApiMigrationGoldGenerator
+from rf_factory.synthesis.composition.synthetic import candidates_for
+from rf_factory.pipelines.compound_preflight import discovery_preflight
+from rf_factory.discovery.synthetic.recipes import discover_recipes
+from rf_factory.validation.synthetic_acceptance import eval_script
 from rf_factory.repository import RepositoryPreparer
-from rf_factory.usage_analysis import UsageIndex, module_name, module_path
+from rf_factory.discovery.synthetic.usage_analysis import UsageIndex, module_name, module_path
 
 
 def source_repo(tmp_path, caller=None):

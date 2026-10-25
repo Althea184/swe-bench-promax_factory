@@ -1,6 +1,6 @@
 # Refactoring Instance Factory
 
-This repository is a research baseline for synthesizing SWE-Bench ProMax style refactoring instances. It supports a narrow synthetic API migration route and a conservative historical PR mining route. It is not an official ProMax implementation.
+This repository is a research baseline for synthesizing SWE-Bench ProMax style refactoring instances. It supports local and real synthetic migrations, historical mining, compound composition, hybrid composition, and agent rollouts. It is not an official ProMax implementation.
 
 ## Run
 
@@ -23,21 +23,24 @@ python -m pytest tests -q
 
 `--output` names the instance collection directory. Each successful instance is published to `<output>/<instance-id>/`; an existing instance directory is never overwritten. Generation evidence is staged in `.rf-factory-work/` beside the collection, keeping incomplete attempts out of `runs/`. A local batch stores its source once in `<output>/_bases/<content-hash>/source/`; published instances reference that base and omit generation workspaces. The base image is built once when Docker is available. `demo` runs the packaged API migration fixture. `run` reads a TOML config; `repository.source` is relative to that config. The console script is `rf-factory`.
 
-## The one pipeline
+## Code structure
 
-`cli.py:main` calls `pipeline.py:Pipeline.run`:
+`rf_factory` separates shared contracts (`core`), repository acquisition (`repository`), Docker execution (`environment`), historical and synthetic candidate discovery (`discovery`), Gold and task composition (`synthesis`), problem statements (`issue_gen`), instance and solution checks (`validation`), publication (`instances`), solver rollouts (`agents`), and route orchestration (`pipelines`). `pipelines/cli.py` implements the public commands; `__main__.py` preserves `python -m rf_factory`. The former top-level compatibility modules have been removed, so Python callers must import from the functional packages. Fixtures, prompts, CLI commands, and published data layouts remain in their established locations.
 
-1. `repository.py:RepositoryPreparer.prepare` copies and hashes the source tree into `source/`.
-2. `api_migration.py:ApiMigrationDiscovery.discover` finds configured API candidates and supported static usages; `candidates.py:filter_and_rank` selects them and records rejection reasons.
-3. `api_migration.py:ApiMigrationSpecBuilder.build` constructs a structured `TaskSpec`. Candidate means opportunity; TaskSpec means the internal task contract.
-4. `api_migration.py:ApiMigrationGoldGenerator.generate` makes a reference patch; `PatchApplier.apply` checks hashes and applies it to a separate workspace.
-5. `problem_generation.py:ProblemGenerator.generate` derives the solver-facing statement from TaskSpec, without reading gold.
-6. `oracle.py:OracleBuilder.build` derives acceptance conditions from TaskSpec and source hashes. `BaselineOracle` confirms the original tests pass.
-7. `verifier.py:verify` runs structural, regression, and functional checks on both gold and unchanged workspaces.
-8. `evaluator.py:Evaluator` scores the observations and requires gold PASS / no-op FAIL.
-9. `instance_builder.py:InstanceBuilder.build` packages accepted tasks; `pipeline.py` exports JSON and JSONL.
+See [docs/architecture.md](docs/architecture.md) for the directory tree, dependency diagram, complete migration map, route call chains, and guidance for adding a refactoring strategy.
 
-`models.py` defines stage records, `config.py` validates experiment settings, `common.py` handles safe serialization and hashes, and `test_runner.py` is the portable unittest adapter. The local pipeline supports API migration and recipe-guided module responsibility migration. The latter consolidates equivalent, self-contained top-level functions from at least two caller modules into an existing service module, then redirects local calls through imports. Unsupported definitions are rejected during discovery. `run-real` remains the Docker-gated API migration MVP.
+## Local pipeline
+
+`pipelines/cli.py:main` dispatches to `pipelines/local.py:Pipeline.run` for `demo` and `run`:
+
+1. `repository/snapshot.py:RepositoryPreparer.prepare` copies and hashes the source tree into `source/`.
+2. `discovery/synthetic/` finds configured candidates and supported static usages, then ranks them and records rejection reasons.
+3. `synthesis/generators/` constructs a `TaskSpec`, makes the Gold Patch, and applies it to a separate workspace.
+4. `issue_gen/generator.py:ProblemGenerator.generate` derives the solver-facing statement from TaskSpec, without reading gold.
+5. `validation/` builds the Oracle, runs the baseline and portable verifier, and requires Gold PASS / No-op FAIL.
+6. `instances/` builds and publishes accepted instances; `environment/` handles Docker resources.
+
+`core/models.py` defines stage records, `core/config.py` validates experiment settings, `core/common.py` handles safe serialization and hashes, and `validation/test_runner.py` is the portable unittest adapter. The local pipeline supports API migration and recipe-guided module responsibility migration. The latter consolidates equivalent, self-contained top-level functions from at least two caller modules into an existing service module, then redirects local calls through imports. Unsupported definitions are rejected during discovery. `run-real` remains the Docker-gated API migration MVP.
 
 ## Problem statement policy
 

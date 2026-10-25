@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-rf-factory = "rf_factory.cli:main"
+rf-factory = "rf_factory.pipelines.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["rf_factory*"]
