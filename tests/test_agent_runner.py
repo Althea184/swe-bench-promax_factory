@@ -3,7 +3,7 @@ import json
 import subprocess
 import sys
 
-from rf_factory import agent_runner
+from rf_factory.agents import runner as agent_runner
 
 
 def test_codex_cli_usage_fallback_ignores_other_output():

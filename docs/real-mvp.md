@@ -2,7 +2,7 @@
 
 ## 改造前的结构与差距
 
-现有 `rf_factory.cli` 调用 `Pipeline.run`，顺序经过 `RepositoryPreparer`、`ApiMigrationDiscovery`、候选筛选、`ApiMigrationSpecBuilder`、`ApiMigrationGoldGenerator`、`ProblemGenerator`、`OracleBuilder`、`verifier`、`Evaluator`、`InstanceBuilder`。各阶段的 JSON、Gold 和正负控制结果保留在运行目录。Toy 路线接受本地目录和显式 migration recipe，基线与 gold/no-op 测试在宿主机执行，导出的是 `rf.instance.v3`，Dockerfile 没有真实项目的依赖安装或 Git commit 约束。
+现有 `rf_factory.pipelines.cli` 调用 `Pipeline.run`，顺序经过 `RepositoryPreparer`、`ApiMigrationDiscovery`、候选筛选、`ApiMigrationSpecBuilder`、`ApiMigrationGoldGenerator`、`ProblemGenerator`、`OracleBuilder`、`verifier`、`Evaluator`、`InstanceBuilder`。各阶段的 JSON、Gold 和正负控制结果保留在运行目录。Toy 路线接受本地目录和显式 migration recipe，基线与 gold/no-op 测试在宿主机执行，导出的是 `rf.instance.v3`，Dockerfile 没有真实项目的依赖安装或 Git commit 约束。
 
 MVP 1 的真实路线由 `run-real` 进入 `RealPipeline`。它从 GitHub URL 或该 GitHub 仓库的本地克隆取得独立 checkout，固定完整 SHA；扫描顶层双参数 Python 函数及静态调用图，自动选择把第二个位置参数迁移为仅关键字参数的候选。已有 Gold 变换与题面模块继续使用；新增独立 Test Patch、Docker 正负验证及 ProMax 导出。候选不来自历史 PR。
 
@@ -10,9 +10,9 @@ MVP 1 的真实路线由 `run-real` 进入 `RealPipeline`。它从 GitHub URL �
 
 ## 实施文件与顺序
 
-1. `rf_factory/real_pipeline.py`：获取/固定 commit、自动候选、Docker 基线、Gold/Test Patch、正负验证和官方导出。
-2. `rf_factory/api_migration.py`：让 Gold 输出为 `git apply` 可识别的 Git diff；支持包 `__init__.py` 路径。
-3. `rf_factory/config.py`、`rf_factory/cli.py`：自动发现 recipe 的空行为用例约定和 `run-real` 入口。
+1. `rf_factory/pipelines/real.py`：获取/固定 commit、自动候选、Docker 基线、Gold/Test Patch、正负验证和官方导出。
+2. `rf_factory/synthesis/generators/api_migration.py`：让 Gold 输出为 `git apply` 可识别的 Git diff；支持包 `__init__.py` 路径。
+3. `rf_factory/core/config.py`、`rf_factory/pipelines/cli.py`：自动发现 recipe 的空行为用例约定和 `run-real` 入口。
 4. `scripts/official_eval_windows.py`：在 Windows 上调用未修改的官方评分模块，修正其 POSIX 单引号与临时文件换行问题。
 5. `tests/test_real_pipeline.py`：候选发现和 Test Patch 的 no-op/gold 控制测试。
 

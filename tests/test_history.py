@@ -3,13 +3,17 @@ import subprocess
 
 import pytest
 
-from rf_factory.candidate_pool import relationship, synthetic_candidate
-from rf_factory.history import HistoryPipeline, classify, resolve_base, resolve_pr, discover_history
-from rf_factory.history_analysis import structural_evidence
-from rf_factory.history_acceptance import choose_strategy
-from rf_factory.history_scan import CachedGitHub, read_pr_urls, scan_history
-from rf_factory.history_composition import compose_consecutive
-from rf_factory.models import Candidate, RefactoringCandidate, RefactoringTaskSpec, TaskSpec
+from rf_factory.synthesis.candidate_pool import relationship, synthetic_candidate
+from rf_factory.pipelines.historical import HistoryPipeline
+from rf_factory.discovery.historical.analysis import classify, structural_evidence
+from rf_factory.repository.git_history import resolve_base
+from rf_factory.repository.github import resolve_pr
+from rf_factory.synthesis.generators.historical import discover_history
+from rf_factory.validation.historical_acceptance import choose_strategy
+from rf_factory.pipelines.history_scan import CachedGitHub, scan_history
+from rf_factory.discovery.historical.inputs import read_pr_urls
+from rf_factory.synthesis.composition.historical import compose_consecutive
+from rf_factory.core.models import Candidate, RefactoringCandidate, RefactoringTaskSpec, TaskSpec
 
 
 def git(root, *args):
@@ -261,7 +265,7 @@ def test_github_metadata_cache_reuses_a_response(tmp_path, monkeypatch):
     def fake_github(path):
         calls.append(path)
         return {"path": path}
-    monkeypatch.setattr("rf_factory.history_scan.github_json", fake_github)
+    monkeypatch.setattr("rf_factory.pipelines.history_scan.github_json", fake_github)
     cache = CachedGitHub(tmp_path)
     assert cache("/repos/owner/repo/pulls/7") == {"path": "/repos/owner/repo/pulls/7"}
     assert cache("/repos/owner/repo/pulls/7") == {"path": "/repos/owner/repo/pulls/7"}

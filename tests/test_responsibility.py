@@ -3,9 +3,9 @@ import shutil
 from pathlib import Path
 from uuid import uuid4
 
-from rf_factory.config import Config
-from rf_factory.pipeline import Pipeline
-from rf_factory.verifier import verify
+from rf_factory.core.config import Config
+from rf_factory.pipelines.local import Pipeline
+from rf_factory.validation.verifier import verify
 
 
 ROOT = Path(__file__).resolve().parents[1]

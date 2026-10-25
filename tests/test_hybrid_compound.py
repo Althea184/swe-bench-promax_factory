@@ -1,11 +1,12 @@
 """N-task contracts and local calls needed by historical-plus-synthetic composition."""
 import pytest
 
-from rf_factory.api_migration import (ApiMigrationDiscovery, ApiMigrationGoldGenerator,
-                                      ApiMigrationSpecBuilder)
-from rf_factory.common import digest
-from rf_factory.config import Config, MigrationRecipe
-from rf_factory.models import Candidate, CompoundTaskSpec, Repository, TaskSpec
+from rf_factory.discovery.synthetic.api_migration import ApiMigrationDiscovery
+from rf_factory.synthesis.generators.api_migration import (ApiMigrationGoldGenerator,
+                                                           ApiMigrationSpecBuilder)
+from rf_factory.core.common import digest
+from rf_factory.core.config import Config, MigrationRecipe
+from rf_factory.core.models import Candidate, CompoundTaskSpec, Repository, TaskSpec
 
 
 def test_four_subtask_dag_rejects_cycle():
