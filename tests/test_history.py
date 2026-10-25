@@ -4,7 +4,10 @@ import subprocess
 import pytest
 
 from rf_factory.candidate_pool import relationship, synthetic_candidate
-from rf_factory.history import HistoryPipeline, classify, resolve_base, resolve_pr
+from rf_factory.history import HistoryPipeline, classify, resolve_base, resolve_pr, discover_history
+from rf_factory.history_analysis import structural_evidence
+from rf_factory.history_acceptance import choose_strategy
+from rf_factory.history_scan import CachedGitHub, read_pr_urls, scan_history
 from rf_factory.history_composition import compose_consecutive
 from rf_factory.models import Candidate, RefactoringCandidate, RefactoringTaskSpec, TaskSpec
 
@@ -158,3 +161,108 @@ def test_consecutive_history_generates_one_final_diff(tmp_path):
     assert "-value = 0" in plan["gold_patch"] and "+value = 2" in plan["gold_patch"]
     assert "+value = 1" not in plan["gold_patch"]
     assert plan["exportable"] is False
+
+
+def test_generic_extraction_decomposition_interface_and_clean_patch(tmp_path):
+    root, base = repo(tmp_path)
+    (root / "code.py").write_text("def convert(value):\n    return value + 1\n", encoding="utf-8")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "original API")
+    base = git(root, "rev-parse", "HEAD")
+    (root / "code.py").write_text(
+        "def _adjust(value):\n    return value + 1\n\n"
+        "def convert(value=None):\n    return _adjust(value)\n", encoding="utf-8")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "extract helper")
+    target = git(root, "rev-parse", "HEAD")
+    record = {"repo_url": "https://github.com/owner/repo", "owner": "owner", "name": "repo",
+              "number": 7, "url": "https://github.com/owner/repo/pull/7",
+              "title": "Extract adjust helper", "description": "Extract shared adjustment logic.",
+              "merge_commit": target, "head_sha": "f" * 40,
+              "pr_commits": ["f" * 40], "pr_files": ["code.py"]}
+    task, patch, report = discover_history(record, root)
+    assert set(task.candidate.refactoring_types) == {
+        "extraction", "decomposition", "interface_evolution"}
+    assert {item["kind"] for item in report["classification"]["operations"]} == {
+        "extraction", "interface_evolution"}
+    strategy = choose_strategy(record, report["classification"], report["evidence"])
+    assert strategy["id"] == "static-structural-operations-v2"
+    assert len(strategy["coverage"]) == 2
+    clean = tmp_path / "clean"
+    git(tmp_path, "clone", "-q", str(root), str(clean))
+    git(clean, "checkout", "-q", base)
+    applied = subprocess.run(["git", "-C", str(clean), "apply", "--check", "-"],
+                             input=patch, text=True, capture_output=True)
+    assert applied.returncode == 0, applied.stderr
+
+
+def test_generic_relocation_evidence_and_mixed_rejection(tmp_path):
+    root, _ = repo(tmp_path)
+    (root / "old.py").write_text("def normalize(value):\n    return value.strip()\n", encoding="utf-8")
+    (root / "new.py").write_text("def caller(value):\n    return value\n", encoding="utf-8")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "initial")
+    base = git(root, "rev-parse", "HEAD")
+    (root / "old.py").write_text("", encoding="utf-8")
+    (root / "new.py").write_text("def normalize(value):\n    return value.strip()\n\n"
+                                 "def caller(value):\n    return normalize(value)\n", encoding="utf-8")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "move function")
+    target = git(root, "rev-parse", "HEAD")
+    evidence = structural_evidence(root, base, target, ["old.py", "new.py"])
+    classification, reason = classify({"title": "Move normalize", "description": ""}, evidence)
+    assert reason is None and classification["types"] == ("relocation",)
+    assert classification["operations"][0]["from_module"] == "old.py"
+    assert choose_strategy({"title": "Move normalize"}, classification, evidence)["coverage"] == ["relocation"]
+    evidence["ancillary_paths"] = ["tests/test_new.py"]
+    classification, reason = classify({"title": "Move normalize", "description": ""}, evidence)
+    assert classification["review_status"] == "mixed_change"
+    assert "mixed non-production" in reason
+
+
+def test_batch_scan_reports_eligible_and_rejected_without_docker(tmp_path):
+    root, _ = repo(tmp_path)
+    (root / "code.py").write_text("def convert(value):\n    return value + 1\n", encoding="utf-8")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "original")
+    (root / "code.py").write_text("def helper(value):\n    return value + 1\n\n"
+                                   "def convert(value):\n    return helper(value)\n", encoding="utf-8")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "extract")
+    target = git(root, "rev-parse", "HEAD")
+    urls = tmp_path / "prs.json"
+    urls.write_text('["https://github.com/owner/repo/pull/7", '
+                    '"https://github.com/owner/repo/pull/8"]', encoding="utf-8")
+    assert len(read_pr_urls(urls)) == 2
+
+    def getter(path):
+        if "/pulls/8" in path and not "/commits" in path and not "/files" in path:
+            return {"merged": False}
+        if path.endswith("/pulls/7"):
+            return {"merged": True, "merge_commit_sha": target, "title": "Extract helper",
+                    "body": "Extract helper", "merged_at": "2024-01-01T00:00:00Z",
+                    "head": {"sha": "f" * 40}}
+        if "/pulls/7/commits" in path:
+            return [{"sha": "f" * 40}]
+        if "/pulls/7/files" in path:
+            return [{"filename": "code.py"}]
+        raise AssertionError(path)
+
+    output = tmp_path / "scan"
+    summary = scan_history(input_path=urls, output=output, cache=tmp_path / "cache",
+                           local_paths={"https://github.com/owner/repo": str(root)}, getter=getter)
+    assert summary["eligible_count"] == 1 and summary["rejected_count"] == 1
+    assert not (output / "Dockerfile").exists()
+    assert "not merged" in (output / "rejections.json").read_text(encoding="utf-8")
+
+
+def test_github_metadata_cache_reuses_a_response(tmp_path, monkeypatch):
+    calls = []
+    def fake_github(path):
+        calls.append(path)
+        return {"path": path}
+    monkeypatch.setattr("rf_factory.history_scan.github_json", fake_github)
+    cache = CachedGitHub(tmp_path)
+    assert cache("/repos/owner/repo/pulls/7") == {"path": "/repos/owner/repo/pulls/7"}
+    assert cache("/repos/owner/repo/pulls/7") == {"path": "/repos/owner/repo/pulls/7"}
+    assert calls == ["/repos/owner/repo/pulls/7"]

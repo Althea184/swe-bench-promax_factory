@@ -39,6 +39,20 @@ class ProblemGenerator:
             raise FactoryError("Historical problem statement leaks implementation detail or is too vague")
         return ProblemStatement(text, "medium", "historical-intent-template-v1", quality)
 
+    def generate_compound_historical(self, spec):
+        """Present one goal and both independent requirements without provenance details."""
+        requirements = dict.fromkeys(value for task in spec.subtasks
+                                     for value in task.structural_requirements)
+        invariants = dict.fromkeys(value for task in spec.subtasks
+                                   for value in (*task.behavioral_invariants,
+                                                 *task.compatibility_requirements))
+        text = " ".join((spec.goal.rstrip(".") + ".", *requirements, *invariants))
+        quality = self.check(text, spec)
+        if not quality["passed"]:
+            raise FactoryError("Historical compound problem statement quality check failed: " +
+                               ", ".join(quality["issues"]))
+        return ProblemStatement(text, "medium", "historical-compound-intent-v1", quality)
+
     @staticmethod
     def check(text, spec):
         issues = []

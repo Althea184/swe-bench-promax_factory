@@ -6,6 +6,18 @@ import sys
 from rf_factory import agent_runner
 
 
+def test_codex_cli_usage_fallback_ignores_other_output():
+    events = "\n".join((
+        "not json",
+        json.dumps({"type": "turn.completed", "usage": {
+            "input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 5}}),
+        json.dumps({"type": "turn.completed", "usage": {
+            "input_tokens": 40, "output_tokens": 3}}),
+    ))
+    assert agent_runner._codex_cli_usage(events) == {
+        "input_tokens": 140, "output_tokens": 8}
+
+
 def checked(*argv, cwd=None):
     subprocess.run(argv, cwd=cwd, check=True, capture_output=True)
 
@@ -89,6 +101,20 @@ def test_compound_acceptance_patterns_are_controller_only():
     patch = "+++ b/rf_acceptance/test_rf_migration_0.py\n+++ b/rf_acceptance/test_rf_migration_1.py\n"
     assert agent_runner._acceptance_patterns(patch) == [
         "test_rf_migration_0.py", "test_rf_migration_1.py"]
+
+
+def test_historical_compound_acceptance_patterns_are_reported():
+    patch = "+++ b/rf_acceptance/test_rf_history_0.py\n+++ b/rf_acceptance/test_rf_history_1.py\n"
+    assert agent_runner._acceptance_patterns(patch) == [
+        "test_rf_history_0.py", "test_rf_history_1.py"]
+
+
+def test_agent_cli_error_is_not_reported_as_empty_patch(tmp_path, monkeypatch):
+    run, instance = published_instance(tmp_path, monkeypatch)
+    summary = agent_runner.run_agent(run=run, instance_id=instance,
+        output=tmp_path / "results", agent_command=f'"{sys.executable}" -c "import sys; sys.exit(2)"')
+    assert summary["results"][0]["status"] == "agent_error"
+    assert summary["results"][0]["agent_returncode"] == 2
 
 
 def test_reported_turn_limit_blocks_evaluation(tmp_path, monkeypatch):

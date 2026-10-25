@@ -88,7 +88,7 @@ class UsageIndex:
             elif isinstance(node, ast.ImportFrom):
                 imported = self.import_module(module, node)
                 for alias in node.names:
-                    if alias.name == "*" and self.exports(imported, self.api_symbol):
+                    if alias.name == "*" and self.exports(imported, self.api_symbol) and self.star_exports(imported, self.api_symbol):
                         raise ValueError(f"Wildcard import of target API in {self.paths[module]}")
                     local = alias.asname or alias.name
                     if self.exports(imported, alias.name):
@@ -96,6 +96,28 @@ class UsageIndex:
                     elif imported + "." + alias.name in self.trees:
                         result[local] = ("module", imported + "." + alias.name)
         return result
+
+    def star_exports(self, module, symbol):
+        """Apply Python's static __all__ or public-name rule to a star import."""
+        tree = self.trees.get(module)
+        if tree is None:
+            return False
+        if any(isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
+               and node.target.id == "__all__" for node in tree.body):
+            raise ValueError(f"Dynamic __all__ in {self.paths[module]}")
+        if any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+               and isinstance(node.func.value, ast.Name) and node.func.value.id == "__all__"
+               for node in ast.walk(tree)):
+            raise ValueError(f"Dynamic __all__ in {self.paths[module]}")
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
+                    and target.id == "__all__" for target in node.targets):
+                if not isinstance(node.value, (ast.List, ast.Tuple)) or not all(
+                        isinstance(item, ast.Constant) and isinstance(item.value, str)
+                        for item in node.value.elts):
+                    raise ValueError(f"Dynamic __all__ in {self.paths[module]}")
+                return symbol in {item.value for item in node.value.elts}
+        return not symbol.startswith("_")
 
     def resolve(self, node, bindings):
         if isinstance(node, ast.Name):
@@ -115,9 +137,16 @@ class UsageIndex:
         return [node for node in ast.walk(self.trees[module]) if isinstance(node, ast.Call)
                 and self.resolve(node.func, bindings) == ("function", self.api_module)]
 
-    def call_sites(self):
-        return {self.paths[module]: self.calls(module) for module in self.trees
-                if module != self.api_module and self.calls(module)}
+    def call_sites(self, include_local=False):
+        sites = {self.paths[module]: self.calls(module) for module in self.trees
+                 if module != self.api_module and self.calls(module)}
+        if include_local:
+            local = [node for node in ast.walk(self.trees[self.api_module])
+                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                     and node.func.id == self.api_symbol]
+            if local:
+                sites[self.paths[self.api_module]] = local
+        return sites
 
     def dependencies(self, module):
         result = set()

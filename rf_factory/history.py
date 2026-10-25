@@ -1,7 +1,6 @@
 """Conservative mining of merged GitHub refactoring PRs."""
 from __future__ import annotations
 
-import ast
 import base64
 import datetime as dt
 import json
@@ -9,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, replace
@@ -16,6 +16,8 @@ from pathlib import Path
 
 from .candidate_pool import difficulty_metadata
 from .common import FactoryError, digest, write_json
+from .history_analysis import classify, structural_evidence
+from .history_acceptance import choose_strategy
 from .models import RefactoringCandidate, RefactoringTaskSpec
 from .problem_generation import ProblemGenerator
 from .real_pipeline import command, require, eval_script
@@ -32,11 +34,16 @@ def github_json(path):
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "rf-factory-history"}
     if os.environ.get("GITHUB_TOKEN"):
         headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
-            return json.load(response)
-    except (OSError, urllib.error.HTTPError, ValueError) as exc:
-        raise FactoryError(f"GitHub API failed for {path}: {exc}") from exc
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            raise FactoryError(f"GitHub API failed for {path}: {exc}") from exc
+        except (OSError, ValueError) as exc:
+            if attempt == 2 or isinstance(exc, ValueError):
+                raise FactoryError(f"GitHub API failed for {path}: {exc}") from exc
+            time.sleep(0.5 * (attempt + 1))
 
 
 def github_pages(path, getter=github_json):
@@ -127,93 +134,6 @@ def resolve_base(clone, record):
     raise FactoryError("Cannot prove the merged PR base from its commit lineage")
 
 
-def structural_evidence(clone, base, target, changed):
-    evidence = {"functions_changed": [], "classes_added": [], "public_signatures_changed": [],
-                "changed_paths": changed}
-    modules = []
-    for path in changed:
-        if not path.endswith(".py") or path.startswith(("tests/", "test/")):
-            continue
-        old = require(command(["git", "show", f"{base}:{path}"], cwd=clone), "Base source read")
-        new = require(command(["git", "show", f"{target}:{path}"], cwd=clone), "Target source read")
-        old_tree, new_tree = ast.parse(old), ast.parse(new)
-        old_defs = {node.name: node for node in old_tree.body
-                    if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
-        new_defs = {node.name: node for node in new_tree.body
-                    if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
-        for name in old_defs.keys() & new_defs.keys():
-            before, after = old_defs[name], new_defs[name]
-            if ast.dump(before, include_attributes=False) == ast.dump(after, include_attributes=False):
-                continue
-            if isinstance(before, ast.FunctionDef) and isinstance(after, ast.FunctionDef):
-                evidence["functions_changed"].append({"module": path, "symbol": name})
-                if not name.startswith("_") and ast.dump(before.args, include_attributes=False) != ast.dump(
-                        after.args, include_attributes=False):
-                    evidence["public_signatures_changed"].append(name)
-        for name in new_defs.keys() - old_defs.keys():
-            if isinstance(new_defs[name], ast.ClassDef):
-                evidence["classes_added"].append({"module": path, "symbol": name})
-        modules.append(path)
-    evidence["affected_modules"] = sorted(set(modules))
-    return evidence
-
-
-def classify(record, evidence):
-    title = record["title"].lower()
-    description = record["description"]
-    if re.search(r"\b(?:fix|bug|feature|support|security)\b", title) and "refactor" not in title:
-        return None, "PR title indicates a behavior change rather than refactoring"
-    if evidence["public_signatures_changed"]:
-        return None, "public API signatures changed; behavior preservation is not established"
-    changed = evidence["changed_paths"]
-    if any(not path.endswith(".py") or path.startswith(("tests/", "test/")) for path in changed):
-        return None, "mixed non-production changes cannot be separated conservatively"
-    if not evidence["functions_changed"] or not evidence["classes_added"]:
-        return None, "no supported function-to-helper structural extraction detected"
-    if ("canonicalize_version" in [item["symbol"] for item in evidence["functions_changed"]]
-            and "_TrimmedRelease" in [item["symbol"] for item in evidence["classes_added"]]
-            and "Version.__str__" in description and "singledispatch" in description):
-        return {"types": ("extraction", "decomposition"), "strategy": "version-rendering-reuse-v1",
-                "symbols": ("canonicalize_version", "_TrimmedRelease"),
-                "goal": "Refactor canonicalize_version to share Version's string rendering while preserving its public behavior, including trailing-zero handling and invalid version input.",
-                "invariants": ("Preserve canonicalized output and invalid-version fallback.",),
-                "compatibility": ("Keep the public function signature and existing regression tests passing.",),
-                "workflow": "version canonicalization"}, None
-    return None, "structural change has no supported evidence-backed acceptance strategy"
-
-
-def history_test_patch(strategy):
-    if strategy != "version-rendering-reuse-v1":
-        raise FactoryError("No acceptance strategy for this historical refactoring")
-    path = "rf_acceptance/test_rf_history.py"
-    content = '''import unittest
-from unittest.mock import patch
-
-from packaging.utils import canonicalize_version
-from packaging.version import Version
-
-
-class TestVersionRenderingReuse(unittest.TestCase):
-    def test_version_string_rendering_is_reused(self):
-        with patch.object(Version, "__str__", return_value="rendered-by-Version"):
-            self.assertEqual(canonicalize_version(Version("1.2.3"), strip_trailing_zero=False),
-                             "rendered-by-Version")
-
-    def test_string_input_uses_version_rendering(self):
-        with patch.object(Version, "__str__", return_value="rendered-by-Version"):
-            self.assertEqual(canonicalize_version("1.2.3", strip_trailing_zero=False),
-                             "rendered-by-Version")
-
-    def test_public_behavior_is_preserved(self):
-        self.assertEqual(canonicalize_version("1.0.0"), "1")
-        self.assertEqual(canonicalize_version("1.0.0", strip_trailing_zero=False), "1.0.0")
-        self.assertEqual(canonicalize_version("not a version"), "not a version")
-'''
-    lines = content.splitlines(keepends=True)
-    return (f"diff --git a/{path} b/{path}\nnew file mode 100644\n"
-            f"--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{len(lines)} @@\n" +
-            "".join("+" + line for line in lines))
-
 
 def discover_history(record, clone):
     base, merge_method = resolve_base(clone, record)
@@ -230,29 +150,36 @@ def discover_history(record, clone):
     classification, reason = classify(record, evidence)
     if reason:
         raise FactoryError(reason)
+    strategy = choose_strategy(record, classification, evidence)
     base_files = set(require(command(["git", "ls-tree", "-r", "--name-only", base], cwd=clone),
                              "Base tree inspection").splitlines())
-    modules = tuple(sorted({module_name(path, base_files) for path in changed
+    modules = tuple(sorted({module_name(path, base_files) for path in evidence["production_paths"]
                             if path.endswith(".py")}))
     identity = digest(f"{record['url']}:{base}:{target}:{digest(raw.encode())}".encode())[:20]
-    candidate = RefactoringCandidate(identity, record["repo_url"], base, "historical",
+    source_refs = (({"kind": "commit", "sha": target, "url": record["url"]},) if
+        record.get("metadata_source") == "git_commit" else
         ({"kind": "pull_request", "url": record["url"], "number": record["number"]},
-         {"kind": "commit", "sha": target}),
+         {"kind": "commit", "sha": target}))
+    candidate = RefactoringCandidate(identity, record["repo_url"], base, "historical",
+        source_refs,
         classification["types"], classification["symbols"], modules,
-        classification["goal"], classification["invariants"], classification["compatibility"],
+        strategy["goal"], strategy["invariants"], strategy["compatibility"],
         "developer_patch", evidence={**evidence, "workflow": classification["workflow"],
                                     "intent_excerpt": record["description"]},
         metadata={"target_commit": target, "merge_method": merge_method,
-                  "acceptance_strategy": classification["strategy"],
+                  "acceptance_strategy": strategy["id"],
                   "raw_patch_sha256": digest(raw.encode())})
     task = RefactoringTaskSpec(candidate, candidate.goal, tuple(changed),
-        ("Reuse the existing Version string renderer for canonicalization.",),
+        strategy["requirements"],
         candidate.behavioral_invariants, candidate.compatibility_requirements,
-        classification["strategy"], {"source": "PR title and description",
-                                     "raw_patch_sha256": digest(raw.encode())})
+        strategy["id"], {"source": ("commit message and structural evidence" if
+            record.get("metadata_source") == "git_commit" else
+            "PR title and description plus structural evidence"),
+                         "acceptance_coverage": strategy["coverage"],
+                         "raw_patch_sha256": digest(raw.encode())})
     return task, raw, {"base_commit": base, "target_commit": target,
                        "merge_method": merge_method, "changed_files": changed,
-                       "evidence": evidence}
+                       "classification": classification, "evidence": evidence}
 
 
 class HistoryPipeline:
@@ -299,15 +226,14 @@ class HistoryPipeline:
                 raise FactoryError("Historical base checkout is dirty")
             repo = RepositoryPreparer().prepare(clone, output / "source")
             try:
-                symbol = task.candidate.affected_symbols[0]
-                function = next(item for item in discovery["evidence"]["functions_changed"]
-                                if item["symbol"] == symbol)
+                function = next(iter(discovery["evidence"]["functions_changed"]))
+                symbol = function["symbol"]
                 module = module_name(function["module"], repo.files)
                 index = UsageIndex(repo.snapshot, repo.files, module, symbol)
                 caller_count = sum(len(nodes) for nodes in index.call_sites().values())
                 task = replace(task, candidate=replace(task.candidate,
                     metadata={**task.candidate.metadata, "affected_callers": caller_count}))
-            except (ValueError, OSError, SyntaxError) as exc:
+            except (ValueError, OSError, SyntaxError, StopIteration) as exc:
                 task = replace(task, candidate=replace(task.candidate,
                     metadata={**task.candidate.metadata, "caller_analysis_error": str(exc)}))
             write_json(output / "discovery.json", discovery)
@@ -365,7 +291,8 @@ class HistoryPipeline:
                        "stdout": baseline.stdout, "stderr": baseline.stderr})
             require(baseline, "History original regression suite")
             stage = "validation"
-            test_patch = history_test_patch(task.acceptance_strategy)
+            strategy = choose_strategy(record, discovery["classification"], discovery["evidence"])
+            test_patch = strategy["test_patch"]
             script = eval_script(test_patch, test_argv, "test_rf_history.py", "rf_acceptance")
             encoded = base64.b64encode(raw_patch.encode()).decode()
             apply = ("cd /testbed && echo '" + encoded +
@@ -377,7 +304,7 @@ class HistoryPipeline:
                        "stdout": value.stdout, "stderr": value.stderr} for key, value in controls.items()})
             if (controls["noop"].returncode == 0 or controls["gold"].returncode != 0 or
                     controls["gold_clean_apply"].returncode != 0 or
-                    "test_version_string_rendering_is_reused" not in controls["noop"].stderr):
+                    strategy["noop_failure_marker"] not in controls["noop"].stderr):
                 raise FactoryError("History Gold, No-op, or clean-apply Docker control failed")
             stage = "export"
             problem = ProblemGenerator().generate_historical(task).text

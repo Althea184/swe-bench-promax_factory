@@ -38,7 +38,7 @@ class ApiMigrationDiscovery:
                         or fn.args.kwonlyargs or fn.args.vararg or fn.args.kwarg):
                     raise ValueError("unsupported API signature")
                 index = UsageIndex(repo.snapshot, repo.files, recipe.module, recipe.symbol)
-                calls = index.call_sites()
+                calls = index.call_sites(include_local=config.include_local_calls)
                 if recipe.symbol != recipe.target_symbol and any(
                         name != recipe.module and index.exports(name, recipe.symbol)
                         and any(isinstance(node, ast.ImportFrom) and index.import_module(tree_module, node) == name
@@ -67,7 +67,7 @@ class ApiMigrationSpecBuilder:
         if candidate.strategy != "api-migration-v2" or repo.files.get(candidate.path) != candidate.source_sha256 or recipe is None:
             raise FactoryError("Stale or unsupported migration candidate")
         index = UsageIndex(repo.snapshot, repo.files, recipe.module, recipe.symbol)
-        calls = index.call_sites()
+        calls = index.call_sites(include_local=config.include_local_calls)
         if len(calls) < config.min_caller_modules:
             raise FactoryError("Migration has too few caller modules")
         structure = (f"Make {recipe.parameter} keyword-only on the public API.",
@@ -75,12 +75,13 @@ class ApiMigrationSpecBuilder:
         if recipe.symbol != recipe.target_symbol:
             structure += ("Replace the old public API name across imports and calls.",)
         return TaskSpec(candidate, "api_migration", recipe.goal,
-                        (candidate.path, *sorted(calls)),
+                        tuple(dict.fromkeys((candidate.path, *sorted(calls)))),
                         {"api_module": candidate.path, "module": recipe.module,
                          "current_api": recipe.symbol, "target_api": recipe.target_symbol,
                          "keyword_parameter": recipe.parameter},
                         structure, recipe.behavioral_invariants, recipe.compatibility_requirements,
-                        {"strategy": "python-api-migration-v2", "call_counts": {path: len(nodes) for path, nodes in calls.items()},
+                        {"strategy": "python-api-migration-v2", "include_local_calls": config.include_local_calls,
+                         "call_counts": {path: len(nodes) for path, nodes in calls.items()},
                          "functional_cases": recipe.functional_cases, "dependency_depth": index.dependency_depth()})
 
 
@@ -92,8 +93,8 @@ class ApiMigrationGoldGenerator:
         new = spec.entities["target_api"]
         parameter = spec.entities["keyword_parameter"]
         index = UsageIndex(repo.snapshot, repo.files, module, old)
-        sites = index.call_sites()
-        if set(sites) != set(spec.scope) - {api_path}:
+        sites = index.call_sites(include_local=spec.metadata.get("include_local_calls", False))
+        if set(sites) - {api_path} != set(spec.scope) - {api_path}:
             raise FactoryError("Call graph changed after specification")
         changes = []
         paths = list(spec.scope)

@@ -91,7 +91,7 @@ def discover_recipes(repo, *, include_rejections=False):
     return (*result, rejections) if include_rejections else result
 
 
-def test_patch_for(spec, path="tests/test_rf_migration.py"):
+def test_patch_for(spec, path="tests/test_rf_migration.py", accepted_symbols=None):
     """New test checks the requirement independently of the reference patch."""
     content = '''import ast
 import unittest
@@ -99,7 +99,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 API_PATH = %r
-SYMBOL = %r
+SYMBOLS = %r
 PARAMETER = %r
 CALLERS = %r
 
@@ -107,7 +107,7 @@ CALLERS = %r
 class TestRefactoringContract(unittest.TestCase):
     def test_public_api_requires_named_argument(self):
         tree = ast.parse((ROOT / API_PATH).read_text(encoding="utf-8"))
-        matches = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == SYMBOL]
+        matches = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in SYMBOLS]
         self.assertEqual(len(matches), 1)
         fn = matches[0]
         self.assertEqual([arg.arg for arg in fn.args.kwonlyargs], [PARAMETER])
@@ -118,12 +118,12 @@ class TestRefactoringContract(unittest.TestCase):
             with self.subTest(path=path):
                 tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
                 calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-                         and (getattr(node.func, "id", None) == SYMBOL or
-                              getattr(node.func, "attr", None) == SYMBOL)]
+                         and (getattr(node.func, "id", None) in SYMBOLS or
+                              getattr(node.func, "attr", None) in SYMBOLS)]
                 self.assertGreaterEqual(len(calls), count)
                 self.assertTrue(all(len(node.args) == 1 and len(node.keywords) == 1 and
                                     node.keywords[0].arg == PARAMETER for node in calls))
-''' % (spec.entities["api_module"], spec.entities["target_api"],
+''' % (spec.entities["api_module"], tuple(accepted_symbols or (spec.entities["target_api"],)),
        spec.entities["keyword_parameter"], spec.metadata["call_counts"])
     lines = content.splitlines(keepends=True)
     patch = (f"diff --git a/{path} b/{path}\nnew file mode 100644\n"

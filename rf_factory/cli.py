@@ -13,6 +13,10 @@ from .publish import publish_run
 from .base_image import export_base
 from .agent_runner import run_agent
 from .history import HistoryPipeline
+from .history_scan import scan_history
+from .history_scan import CachedGitHub
+from .history_compound import HistoryCompoundPipeline
+from .hybrid_compound import HybridCompoundPipeline
 
 
 def run_and_publish(args, config=None):
@@ -22,15 +26,34 @@ def run_and_publish(args, config=None):
     staging = work_root / uuid4().hex
     if args.command == "run-history":
         import shlex
+        getter = CachedGitHub(args.cache.resolve()) if args.cache else None
         if args.preflight:
+            kwargs = {"getter": getter} if getter else {}
             return HistoryPipeline().run(output=output_root, pr_url=args.pr_url,
                 repo_url=args.repo_url, commit=args.commit, issue_url=args.issue_url,
                 local_path=args.local_path, preflight=True, base_image=args.base_image,
-                offline_build=args.offline_build, test_argv=shlex.split(args.test_command))
+                offline_build=args.offline_build, test_argv=shlex.split(args.test_command), **kwargs)
+        kwargs = {"getter": getter} if getter else {}
         result = HistoryPipeline().run(output=staging, pr_url=args.pr_url,
             repo_url=args.repo_url, commit=args.commit, issue_url=args.issue_url,
             local_path=args.local_path, base_image=args.base_image,
+            offline_build=args.offline_build, test_argv=shlex.split(args.test_command), **kwargs)
+    elif args.command == "run-history-compound":
+        import shlex
+        destination = output_root if args.preflight else staging
+        result = HistoryCompoundPipeline().run(output=destination,
+            pr_urls=args.pr_urls, commits=args.commits, repo_url=args.repo_url,
+            local_path=args.local_path, cache=args.cache,
+            preflight=args.preflight, base_image=args.base_image,
             offline_build=args.offline_build, test_argv=shlex.split(args.test_command))
+        if args.preflight:
+            return result
+    elif args.command == "run-hybrid-compound":
+        import shlex
+        result = HybridCompoundPipeline().run(output=staging, commits=args.commits,
+            repo_url=args.repo_url, local_path=args.local_path,
+            base_image=args.base_image, offline_build=args.offline_build,
+            test_argv=shlex.split(args.test_command))
     elif args.command == "run-real":
         import shlex
         if args.preflight:
@@ -92,6 +115,35 @@ def main(argv=None):
     history.add_argument("--test-command", default="python -m pytest -q tests")
     history.add_argument("--base-image", default="python:3.11-slim")
     history.add_argument("--offline-build", action="store_true")
+    history.add_argument("--cache", type=Path, help="Reuse metadata cached by history-scan")
+    history_compound = commands.add_parser("run-history-compound",
+        help="Compose two related consecutive historical refactorings")
+    historical_sources = history_compound.add_mutually_exclusive_group(required=True)
+    historical_sources.add_argument("--pr-urls", nargs=2)
+    historical_sources.add_argument("--commits", nargs=2)
+    history_compound.add_argument("--repo-url", help="Required with --commits")
+    history_compound.add_argument("--local-path", type=Path)
+    history_compound.add_argument("--cache", type=Path)
+    history_compound.add_argument("--output", required=True, type=Path)
+    history_compound.add_argument("--preflight", action="store_true")
+    history_compound.add_argument("--test-command", default="python -m pytest -q tests")
+    history_compound.add_argument("--base-image", default="python:3.11-slim")
+    history_compound.add_argument("--offline-build", action="store_true")
+    hybrid = commands.add_parser("run-hybrid-compound",
+        help="Compose two historical relocations and dependent API migrations")
+    hybrid.add_argument("--commits", nargs=2, required=True)
+    hybrid.add_argument("--repo-url", required=True)
+    hybrid.add_argument("--local-path", type=Path)
+    hybrid.add_argument("--output", required=True, type=Path)
+    hybrid.add_argument("--test-command", default="python -m pytest -q tests")
+    hybrid.add_argument("--base-image", default="python:3.11-slim")
+    hybrid.add_argument("--offline-build", action="store_true")
+    scan = commands.add_parser("history-scan", help="Preflight multiple merged GitHub refactoring PRs")
+    scan.add_argument("--input", required=True, type=Path, help="JSON or newline-separated PR URLs")
+    scan.add_argument("--output", required=True, type=Path)
+    scan.add_argument("--cache", type=Path, default=Path(".rf-factory-work/history-cache"))
+    scan.add_argument("--local-path-map", type=Path,
+                      help="Optional JSON mapping of GitHub repository URLs to clean local clones")
     check = commands.add_parser("validate-config")
     check.add_argument("--config", required=True, type=Path)
     rollout = commands.add_parser("prepare-rollout", help="Export base repository and solver-visible task only")
@@ -137,6 +189,23 @@ def main(argv=None):
             result = run_and_publish(args)
             print(dumps(result, indent=2))
             return 0 if result.get("status") in {"completed", "preflight_completed"} else 1
+        if args.command == "run-history-compound":
+            result = run_and_publish(args)
+            print(dumps(result, indent=2))
+            return 0 if result.get("status") in {"completed", "preflight_completed"} else 1
+        if args.command == "run-hybrid-compound":
+            result = run_and_publish(args)
+            print(dumps(result, indent=2))
+            return 0 if result.get("status") == "completed" else 1
+        if args.command == "history-scan":
+            import json
+            local_paths = json.loads(args.local_path_map.read_text(encoding="utf-8-sig")) if args.local_path_map else {}
+            if not isinstance(local_paths, dict):
+                raise FactoryError("Local path map must be a JSON object")
+            result = scan_history(input_path=args.input, output=args.output,
+                                  cache=args.cache, local_paths=local_paths)
+            print(dumps(result, indent=2))
+            return 0
         if args.command == "demo":
             config = Config(Path(__file__).with_name("fixtures") / "api_migration_repo")
         else:

@@ -228,6 +228,8 @@ runs-responsibility/
 runs-compound-*/
 runs-agent-*/
 runs-history-*/
+runs-hybrid-*/
+runs-rollout-*/
 runs-single-compat-*/
 compound-rollout-*/
 compound-pytest-*/

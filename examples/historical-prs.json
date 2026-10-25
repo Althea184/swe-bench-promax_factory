@@ -1,0 +1,12 @@
+{
+  "prs": [
+    "https://github.com/pypa/packaging/pull/793",
+    "https://github.com/pallets/click/pull/3372",
+    "https://github.com/encode/httpx/pull/3382",
+    "https://github.com/psf/requests/pull/5924",
+    "https://github.com/pallets/click/pull/2517",
+    "https://github.com/psf/requests/pull/6187",
+    "https://github.com/pallets/click/pull/2202",
+    "https://github.com/pallets/werkzeug/pull/2415"
+  ]
+}

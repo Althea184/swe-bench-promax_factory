@@ -107,24 +107,42 @@ class TaskSpec:
 @dataclass(frozen=True)
 class CompoundTaskSpec:
     """Private contract for one instance composed from ordered task contracts."""
-    subtasks: tuple[TaskSpec, ...]
+    subtasks: tuple[TaskSpec | RefactoringTaskSpec, ...]
     dependency_edges: tuple[tuple[str, str], ...]
     goal: str
     scope: tuple[str, ...]
     metadata: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        if len(self.subtasks) != 2 or any(task.refactoring_type != "api_migration" for task in self.subtasks):
-            raise ValueError("Compound MVP requires exactly two API migrations")
+        if len(self.subtasks) < 2:
+            raise ValueError("Compound requires at least two subtasks")
+        if not all(isinstance(task, (TaskSpec, RefactoringTaskSpec)) for task in self.subtasks):
+            raise ValueError("Unsupported compound subtask")
         ids = [task.candidate.candidate_id for task in self.subtasks]
-        if len(set(ids)) != 2 or not self.goal.strip():
+        if len(set(ids)) != len(ids) or not self.goal.strip():
             raise ValueError("Invalid compound task identity or goal")
         if set(self.scope) != set().union(*(set(task.scope) for task in self.subtasks)):
-            raise ValueError("Compound scope must cover both subtasks")
+            raise ValueError("Compound scope must cover all subtasks")
         for path in self.scope:
             relative(path)
         if any(a not in ids or b not in ids or a == b for a, b in self.dependency_edges):
             raise ValueError("Invalid compound dependency edge")
+        successors = {identity: [] for identity in ids}
+        for before, after in self.dependency_edges:
+            successors[before].append(after)
+        visiting, visited = set(), set()
+        def visit(identity):
+            if identity in visiting:
+                raise ValueError("Cyclic compound dependency")
+            if identity in visited:
+                return
+            visiting.add(identity)
+            for following in successors[identity]:
+                visit(following)
+            visiting.remove(identity)
+            visited.add(identity)
+        for identity in ids:
+            visit(identity)
 
 
 @dataclass(frozen=True)

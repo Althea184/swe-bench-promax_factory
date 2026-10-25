@@ -66,6 +66,11 @@ def publish_run(staging: Path, output_root: Path) -> list[Path]:
     def skip_workspaces(directory, names):
         current = Path(directory)
         if current == staging:
+            return ({"source", "acquired", "workspace", "post-history-source",
+                     "partial-without-2-workspace"} & set(names)) | {
+                name for name in names if name.startswith("synthetic-") and
+                (name.endswith("-source") or name.endswith("-after"))}
+        if current == staging / "historical-stage":
             return {"source", "acquired"} & set(names)
         if current.parent == staging / "attempts":
             return {name for name in names if name == "workspace" or name.startswith("step-")}

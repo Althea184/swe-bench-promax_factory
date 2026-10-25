@@ -85,6 +85,28 @@ def _agent_report(path):
             if key in report}
 
 
+def _codex_cli_usage(stdout):
+    """Read token counts from Codex CLI JSONL when an adapter report is absent."""
+    totals = {"input_tokens": 0, "output_tokens": 0}
+    completed = 0
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "turn.completed":
+            continue
+        usage = event.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        if any(type(usage.get(key)) is not int or usage[key] < 0 for key in totals):
+            continue
+        completed += 1
+        for key in totals:
+            totals[key] += usage[key]
+    return totals if completed else {}
+
+
 def _collect_patch(repository, base_commit, forbidden_paths):
     head = _require(_git(repository, "rev-parse", "HEAD"), "Solver HEAD inspection")
     _require(_git(repository, "merge-base", "--is-ancestor", base_commit, head),
@@ -106,7 +128,7 @@ def _acceptance_patterns(test_patch):
     paths = [line.removeprefix("+++ b/") for line in test_patch.splitlines()
              if line.startswith("+++ b/")]
     return [path.rsplit("/", 1)[-1] for path in paths
-            if re.fullmatch(r"rf_acceptance/test_rf_migration_[0-9]+\.py", path)]
+            if re.fullmatch(r"rf_acceptance/test_rf_(?:migration|history)_[0-9]+\.py", path)]
 
 
 def _evaluate(image_id, patch_path, script_path, attempt, timeout, patterns=()):
@@ -196,6 +218,8 @@ def run_agent(*, run: Path, instance_id: str, output: Path, agent_command: str,
             (attempt / "agent.stdout.txt").write_text(agent.stdout, encoding="utf-8")
             (attempt / "agent.stderr.txt").write_text(agent.stderr, encoding="utf-8")
             record.update(_agent_report(report_path))
+            for key, value in _codex_cli_usage(agent.stdout).items():
+                record.setdefault(key, value)
             base = row["repository"]["base_commit"]
             test_patch = (run / "test.patch").read_text(encoding="utf-8")
             protected = {line.removeprefix("+++ b/") for line in test_patch.splitlines()
@@ -207,6 +231,8 @@ def run_agent(*, run: Path, instance_id: str, output: Path, agent_command: str,
                        "model_name_or_path": model, "model_patch": patch})
             if agent.returncode == 124:
                 record["status"] = "agent_timed_out"
+            elif agent.returncode:
+                record["status"] = "agent_error"
             elif record.get("turns", 0) > max_turns:
                 record["status"] = "turn_limit_exceeded"
             elif not patch:

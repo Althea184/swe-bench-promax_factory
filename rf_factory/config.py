@@ -86,6 +86,7 @@ class Config:
     responsibility_migrations: tuple[ResponsibilityRecipe, ...] = ()
     min_caller_modules: int = 2
     min_changed_files: int = 3
+    include_local_calls: bool = False
 
     def __post_init__(self):
         for name in ("max_candidates", "min_caller_modules", "min_changed_files"):
